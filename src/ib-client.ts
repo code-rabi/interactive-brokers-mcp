@@ -49,6 +49,7 @@ export class IBClient {
   private maxAuthAttempts = 3;
   private tickleInterval?: NodeJS.Timeout;
   private tickleIntervalMs = 30000; // 30 seconds (well within 1/sec rate limit)
+  private sessionCookieHeader?: string;
 
   constructor(config: IBClientConfig) {
     this.config = config;
@@ -116,6 +117,37 @@ export class IBClient {
     );
   }
 
+  setSessionCookies(cookies: Array<{ name?: string; value?: string; domain?: string }>): void {
+    const gatewayCookieNames = new Set(["SBID", "device.info", "TABID", "XYZAB_AM.LOGIN", "XYZAB"]);
+    const localhostCookies = (cookies || []).filter((cookie) => {
+      if (!cookie?.name || !cookie?.value) {
+        return false;
+      }
+
+      const domain = String(cookie.domain || "").toLowerCase();
+      // Match the browser cookies Gateway itself sets on localhost. Forwarding
+      // unrelated redirect/login cookies can prevent brokerage-session init from
+      // reaching established=true on some Client Portal Gateway builds.
+      const localDomain = !domain || domain === "localhost" || domain === "127.0.0.1" || domain.endsWith(".localhost");
+      return localDomain && gatewayCookieNames.has(cookie.name);
+    });
+
+    const header = localhostCookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+
+    this.sessionCookieHeader = header || undefined;
+    if (this.client) {
+      if (this.sessionCookieHeader) {
+        this.client.defaults.headers.common.Cookie = this.sessionCookieHeader;
+      } else {
+        delete this.client.defaults.headers.common.Cookie;
+      }
+    }
+
+    Logger.log(`[AUTH] Captured ${localhostCookies.length}/${(cookies || []).length} localhost browser cookies for REST API calls`);
+  }
+
   private createRawClient(timeout = 30000): AxiosInstance {
     return axios.create({
       baseURL: this.baseUrl,
@@ -123,11 +155,23 @@ export class IBClient {
       httpsAgent: new https.Agent({
         rejectUnauthorized: false,
       }),
+      headers: this.sessionCookieHeader ? { Cookie: this.sessionCookieHeader } : undefined,
     });
   }
 
   private isStatusAuthenticated(status: any): boolean {
-    return status?.authenticated === true && status?.connected !== false;
+    if (!status || typeof status !== "object") {
+      return false;
+    }
+
+    // Newer Gateway responses can distinguish authenticated browser login from
+    // an established brokerage session. Treat established=true as authoritative;
+    // otherwise preserve compatibility with older responses that omit it.
+    if (status.established === true) {
+      return true;
+    }
+
+    return status.authenticated === true && status.connected !== false;
   }
 
   updatePort(newPort: number): void {
@@ -178,10 +222,26 @@ export class IBClient {
    */
   private async tickle(): Promise<void> {
     try {
-      // Create a new axios instance without interceptors to avoid triggering authentication
       const tickleClient = this.createRawClient(10000);
-      
-      await tickleClient.post("/tickle");
+
+      const response = await tickleClient.post("/tickle").catch(async (error) => {
+        // Some Client Portal Gateway builds/documentation expose /tickle as GET,
+        // while OAuth examples use POST. Retry GET only when the method appears
+        // unsupported to avoid masking real authentication/network failures.
+        if (error?.response?.status === 404 || error?.response?.status === 405) {
+          return tickleClient.get("/tickle");
+        }
+        throw error;
+      });
+
+      const authStatus = response.data?.iserver?.authStatus;
+      if (authStatus && !this.isStatusAuthenticated(authStatus)) {
+        this.isAuthenticated = false;
+        this.stopTickle();
+        Logger.warn("[TICKLE] Tickle returned unauthenticated status:", authStatus);
+        return;
+      }
+
       Logger.log("[TICKLE] Session maintenance ping sent successfully");
     } catch (error) {
       Logger.warn("[TICKLE] Failed to send session maintenance ping:", error);
@@ -234,77 +294,134 @@ export class IBClient {
    * an x-www-form-urlencoded body derived from auth/status. An empty POST may return
    * HTTP 200 but leave the session unauthenticated with:
    * "Force compete capability must be used together with compete flag".
+   *
+   * Some Gateway builds also require the browser's localhost SSO cookies when
+   * converting web login state into an established brokerage session. Run the
+   * documented sequence once without cookies to prime the Gateway, then repeat it
+   * with the filtered browser-cookie header captured from Playwright.
    */
-  private async initializeBrokerageSession(): Promise<boolean> {
-    const authClient = this.createRawClient();
+  async initializeBrokerageSession(): Promise<boolean> {
+    const cookieClient = this.createRawClient();
+    const noCookieClient = this.sessionCookieHeader
+      ? axios.create({
+          baseURL: this.baseUrl,
+          timeout: 30000,
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+        })
+      : undefined;
 
-    Logger.log("[BROKERAGE-INIT] Validating SSO session...");
-    await authClient.get("/sso/validate");
+    const sleep = (ms: number) => this.sessionCookieHeader
+      ? new Promise((resolve) => setTimeout(resolve, ms))
+      : Promise.resolve();
 
-    Logger.log("[BROKERAGE-INIT] Reading auth status for MAC/hardware info...");
-    let statusResponse = await authClient.get("/iserver/auth/status");
-    Logger.log("[BROKERAGE-INIT] Auth status response:", statusResponse.data);
+    const tryRequest = async (label: string, fn: () => Promise<any>) => {
+      try {
+        const response = await fn();
+        if (response?.data?.error) {
+          Logger.warn(`[BROKERAGE-INIT] ${label} returned error body; continuing:`, response.data.error);
+          return response;
+        }
+        Logger.log(`[BROKERAGE-INIT] ${label} returned ${response?.status || "ok"}`);
+        return response;
+      } catch (error: any) {
+        Logger.warn(`[BROKERAGE-INIT] ${label} failed or is not ready; continuing:`, error?.message || String(error));
+        return undefined;
+      }
+    };
 
-    if (this.isStatusAuthenticated(statusResponse.data)) {
-      this.isAuthenticated = true;
-      this.authAttempts = 0;
-      this.startTickle();
-      return true;
+    const applyStatus = (status: any): boolean => {
+      const authenticated = this.isStatusAuthenticated(status);
+      this.isAuthenticated = authenticated;
+      if (authenticated) {
+        this.authAttempts = 0;
+        this.startTickle();
+      } else {
+        this.stopTickle();
+      }
+      return authenticated;
+    };
+
+    const runOfficialSequence = async (client: AxiosInstance, labelPrefix: string, expectFinal = false): Promise<any> => {
+      Logger.log(`[BROKERAGE-INIT] Running official Gateway brokerage sequence (${labelPrefix})...`);
+
+      await tryRequest(`${labelPrefix} GET /v1/api/sso/validate`, () => client.get("/sso/validate"));
+      let statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
+      if (this.isStatusAuthenticated(statusResponse?.data)) {
+        return statusResponse?.data;
+      }
+
+      // Non-fatal primer: this can return 401 before brokerage init, but it also
+      // nudges Gateway-side server state in some deployments.
+      await tryRequest(`${labelPrefix} GET /v1/api/iserver/accounts`, () => client.get("/iserver/accounts"));
+
+      const authStatus = statusResponse?.data || {};
+      const rawMac = String(authStatus.MAC || "");
+      const rawHardware = String(authStatus.hardware_info || "");
+      const machineId = rawHardware.split("|")[0] || "";
+      const mac = rawMac.replaceAll(":", "-");
+
+      if (machineId && mac) {
+        const ssodhBody = new URLSearchParams({
+          compete: "true",
+          locale: "en_US",
+          mac,
+          machineId,
+          username: "-",
+        }).toString();
+
+        await tryRequest(`${labelPrefix} POST /v1/api/iserver/auth/ssodh/init with official form body`, () =>
+          client.post("/iserver/auth/ssodh/init", ssodhBody, {
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          })
+        );
+      } else {
+        await tryRequest(`${labelPrefix} POST /v1/api/iserver/auth/ssodh/init fallback empty body`, () =>
+          client.post("/iserver/auth/ssodh/init")
+        );
+      }
+
+      await sleep(1000);
+      await tryRequest(`${labelPrefix} POST /v1/api/iserver/reauthenticate`, () => client.post("/iserver/reauthenticate"));
+      await sleep(1000);
+      await tryRequest(`${labelPrefix} POST /v1/api/tickle`, () => client.post("/tickle"));
+      await tryRequest(`${labelPrefix} GET /v1/api/tickle`, () => client.get("/tickle"));
+      await tryRequest(`${labelPrefix} GET /v1/api/portfolio/accounts`, () => client.get("/portfolio/accounts"));
+
+      statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
+      let lastStatus: any = statusResponse?.data;
+      Logger.log(`[BROKERAGE-INIT] Auth status after ${labelPrefix}:`, lastStatus);
+      if (this.isStatusAuthenticated(lastStatus)) {
+        return lastStatus;
+      }
+
+      // Only poll for the browser-cookie pass, and only when browser cookies were
+      // actually captured. The no-cookie pass is a primer; waiting there just adds
+      // latency and makes non-browser reauth callers block unnecessarily.
+      const shouldPoll = expectFinal && Boolean(this.sessionCookieHeader);
+      if (!shouldPoll) {
+        return lastStatus;
+      }
+
+      const deadline = Date.now() + 60000;
+      while (Date.now() < deadline) {
+        await tryRequest(`${labelPrefix} POST /v1/api/tickle`, () => client.post("/tickle"));
+        await sleep(3000);
+        statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
+        lastStatus = statusResponse?.data;
+        Logger.log(`[BROKERAGE-INIT] Auth status after ${labelPrefix}:`, lastStatus);
+        if (this.isStatusAuthenticated(lastStatus)) {
+          return lastStatus;
+        }
+      }
+
+      return lastStatus;
+    };
+
+    if (noCookieClient) {
+      await runOfficialSequence(noCookieClient, "no-cookie", false);
     }
-
-    const rawMac = String(statusResponse.data?.MAC || "");
-    const rawHardware = String(statusResponse.data?.hardware_info || "");
-    const machineId = rawHardware.split("|")[0] || "";
-    const mac = rawMac.replaceAll(":", "-");
-
-    // This endpoint may 401 before the brokerage session is initialized, but it
-    // can also trigger Gateway-side state; treat failures as non-fatal.
-    try {
-      await authClient.get("/iserver/accounts");
-    } catch (error) {
-      Logger.debug("[BROKERAGE-INIT] /iserver/accounts not ready before ssodh/init; continuing", error);
-    }
-
-    if (!machineId || !mac) {
-      Logger.warn("[BROKERAGE-INIT] Missing machineId or MAC from /iserver/auth/status; cannot call ssodh/init form flow");
-      this.isAuthenticated = false;
-      this.stopTickle();
-      return false;
-    }
-
-    const ssodhBody = new URLSearchParams({
-      compete: "true",
-      locale: "en_US",
-      mac,
-      machineId,
-      username: "-",
-    }).toString();
-
-    Logger.log("[BROKERAGE-INIT] Initializing brokerage session via /iserver/auth/ssodh/init...");
-    await authClient.post("/iserver/auth/ssodh/init", ssodhBody, {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
-
-    Logger.log("[BROKERAGE-INIT] Triggering /iserver/reauthenticate...");
-    await authClient.post("/iserver/reauthenticate");
-
-    // /tickle both keeps the session alive and returns nested iserver authStatus.
-    await authClient.post("/tickle");
-
-    statusResponse = await authClient.get("/iserver/auth/status");
-    Logger.log("[BROKERAGE-INIT] Final auth status response:", statusResponse.data);
-
-    const authenticated = this.isStatusAuthenticated(statusResponse.data);
-    this.isAuthenticated = authenticated;
-
-    if (authenticated) {
-      this.authAttempts = 0;
-      this.startTickle();
-    } else {
-      this.stopTickle();
-    }
-
-    return authenticated;
+    const finalStatus = await runOfficialSequence(cookieClient, noCookieClient ? "browser-cookie" : "default", true);
+    return applyStatus(finalStatus);
   }
 
   /**

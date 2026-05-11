@@ -185,14 +185,20 @@ export class ToolHandlers {
       Logger.log(`[BROWSER-AUTH-POLL] Polling ${authUrl} (port ${port}) attempt ${attempts} until ${new Date(deadline).toISOString()}`);
 
       try {
-        const isAuth = await this.context.ibClient.checkAuthenticationStatus();
-
-        if (isAuth) {
-          Logger.log(`[BROWSER-AUTH-POLL] Authentication detected for ${authUrl} (port ${port}), reauthenticating REST session`);
-          // Trigger reauthenticate to establish REST API session
-          await this.context.ibClient.reauthenticate();
-          Logger.log(`[BROWSER-AUTH-POLL] Reauthentication successful for ${authUrl} (port ${port}), REST session established`);
-          return; // Success, stop polling
+        if (typeof this.context.ibClient.initializeBrokerageSession === "function") {
+          const initialized = await this.context.ibClient.initializeBrokerageSession();
+          if (initialized) {
+            Logger.log(`[BROWSER-AUTH-POLL] Brokerage session initialized for ${authUrl} (port ${port})`);
+            return; // Success, stop polling
+          }
+        } else {
+          const isAuth = await this.context.ibClient.checkAuthenticationStatus();
+          if (isAuth) {
+            Logger.log(`[BROWSER-AUTH-POLL] Authentication detected for ${authUrl} (port ${port}), reauthenticating REST session`);
+            await this.context.ibClient.reauthenticate();
+            Logger.log(`[BROWSER-AUTH-POLL] Reauthentication successful for ${authUrl} (port ${port}), REST session established`);
+            return; // Success, stop polling
+          }
         }
       } catch (error) {
         Logger.warn(`[BROWSER-AUTH-POLL] Poll attempt ${attempts} failed for ${authUrl} (port ${port}):`, error);
@@ -239,6 +245,7 @@ export class ToolHandlers {
             password: this.context.config.IB_PASSWORD_AUTH,
             timeout: this.context.config.IB_AUTH_TIMEOUT,
             ibClient: this.context.ibClient,
+            paperTrading: this.context.config.IB_PAPER_TRADING,
           };
 
           // Validate that we have credentials for headless mode

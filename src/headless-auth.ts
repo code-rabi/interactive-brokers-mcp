@@ -104,6 +104,7 @@ export class HeadlessAuthenticator {
       
       const maxWaitTime = authConfig.timeout || 300000; // 5 minutes default
       const startTime = Date.now();
+      let lastBrokerageInitAttempt = 0;
       
       while (Date.now() - startTime < maxWaitTime) {
         await new Promise(resolve => setTimeout(resolve, 3000)); // Check every 3 seconds
@@ -131,26 +132,39 @@ export class HeadlessAuthenticator {
           const currentUrl = this.page.url();
           const pageContent = await this.page.content();
 
+          if (authConfig.ibClient) {
+            const cookies = await this.page.context().cookies();
+            authConfig.ibClient.setSessionCookies(cookies);
+          }
+
           // Check if we successfully authenticated by looking for the specific success message
           const authSuccess = pageContent.includes('Client login succeeds');
 
           if (authSuccess) {
-            Logger.info('🎉 Browser login reports "Client login succeeds"; initializing REST brokerage session...');
+            Logger.info('🎉 Browser login reports "Client login succeeds"; initializing Gateway brokerage session and waiting for REST API authentication...');
 
             if (authConfig.ibClient) {
-              await authConfig.ibClient.reauthenticate();
-              const isAuthenticated = await authConfig.ibClient.checkAuthenticationStatus();
-              if (isAuthenticated) {
-                Logger.info('🎉 Authentication completed! IB Client confirmed REST brokerage authentication.');
-                await this.cleanup();
+              const now = Date.now();
+              if (now - lastBrokerageInitAttempt > 15000) {
+                lastBrokerageInitAttempt = now;
+                try {
+                  const initialized = await authConfig.ibClient.initializeBrokerageSession();
+                  if (initialized) {
+                    Logger.info('🎉 Authentication completed! Brokerage session initialized.');
+                    await this.cleanup();
 
-                return {
-                  success: true,
-                  message: 'Headless authentication completed successfully. REST brokerage session confirmed.'
-                };
+                    return {
+                      success: true,
+                      message: 'Headless authentication completed successfully. Brokerage session initialized.'
+                    };
+                  }
+                } catch (error: any) {
+                  Logger.warn('Brokerage session initialization failed, continuing to wait...', error?.message || String(error));
+                }
               }
 
               Logger.info('🔍 Browser login succeeded, but REST brokerage session is not authenticated yet; continuing to wait...');
+              continue;
             } else {
               await this.cleanup();
 
@@ -254,12 +268,31 @@ export class HeadlessAuthenticator {
           const authSuccess = pageContent.includes('Client login succeeds');
 
           if (authSuccess) {
-            Logger.info('🎉 Authentication completed! Found "Client login succeeds" message.');
+            Logger.info('🎉 Browser login reports "Client login succeeds" during 2FA wait; initializing brokerage session before declaring success...');
+            if (ibClient) {
+              try {
+                const cookies = await this.page.context().cookies();
+                ibClient.setSessionCookies(cookies);
+                const initialized = await ibClient.initializeBrokerageSession();
+                if (initialized) {
+                  await this.cleanup();
+                  return {
+                    success: true,
+                    message: 'Authentication completed successfully. Brokerage session initialized.'
+                  };
+                }
+              } catch (error: any) {
+                Logger.warn('Brokerage session initialization failed during 2FA wait, continuing...', error?.message || String(error));
+              }
+              continue;
+            }
+
+            // Backward compatibility for callers that do not pass an IB client.
             await this.cleanup();
             
             return {
               success: true,
-              message: 'Authentication completed successfully. Client login succeeds message detected.'
+              message: 'Authentication completed successfully. Client login succeeds message detected, but REST auth was not verified because no IB client was provided.'
             };
           }
         } catch (pageError) {
