@@ -79,7 +79,7 @@ export class ToolHandlers {
       return; // Already authenticated
     }
 
-    // If in headless mode, start automatic headless authentication
+    // If in headless mode, start automatic headless authentication in the background and throw a graceful Error
     if (this.context.config.IB_HEADLESS_MODE) {
       const port = this.context.gatewayManager 
         ? this.context.gatewayManager.getCurrentPort() 
@@ -100,12 +100,29 @@ export class ToolHandlers {
         paperTrading: this.context.config.IB_PAPER_TRADING,
       };
 
+      // Trigger authentication in the background (non-blocking)
+      Logger.info("⚡ Background headless authentication triggered...");
       const authenticator = new HeadlessAuthenticator();
-      const result = await authenticator.authenticate(authConfig);
-
-      if (!result.success) {
-        throw new Error(`Authentication failed: ${result.message}`);
+      const p = authenticator.authenticate(authConfig);
+      if (p && typeof p.then === "function") {
+        p.then(async (result) => {
+          await authenticator.close().catch(() => {});
+          Logger.info(`🎯 Background headless authentication completed: success=${result.success}`);
+        }).catch(async (err) => {
+          await authenticator.close().catch(() => {});
+          Logger.error("❌ Background headless authentication failed:", err);
+        });
       }
+
+      // Throw a standard Error that formatError knows how to parse or that is easy to check
+      const payload = {
+        status: "AWAITING_AUTHENTICATION",
+        message: `Authentication has been automatically triggered in the background. Please check your mobile device for the IB Key 2FA push notification or log in manually at ${authUrl} to authenticate. Once completed, re-run this command.`,
+        url: authUrl,
+        requiresAction: true
+      };
+      
+      throw new Error(`__AWAITING_AUTHENTICATION__:${JSON.stringify(payload)}`);
     } else {
       // In non-headless mode, check if the gateway is already authenticated
       // (the user may have completed browser auth via the authenticate tool)
@@ -217,6 +234,9 @@ export class ToolHandlers {
   }
 
   private formatError(error: unknown): string {
+    if (error instanceof Error && error.message.startsWith("__AWAITING_AUTHENTICATION__:")) {
+      return error.message.substring("__AWAITING_AUTHENTICATION__:".length);
+    }
     if (this.isAuthenticationError(error)) {
       return this.getAuthenticationErrorMessage();
     }

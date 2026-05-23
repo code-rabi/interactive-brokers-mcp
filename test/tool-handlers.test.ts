@@ -332,20 +332,24 @@ describe('ToolHandlers', () => {
   });
 
   describe('Headless Mode Authentication', () => {
-    it('should trigger auth in headless mode', async () => {
+    it('should trigger auth in headless mode and return a pending response', async () => {
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
       
       mockIBClient.checkAuthenticationStatus = vi.fn()
-        .mockResolvedValueOnce(false) // First check: not authenticated
-        .mockResolvedValueOnce(true);  // After auth: authenticated
+        .mockResolvedValueOnce(false); // Initial check: not authenticated
 
       handlers = new ToolHandlers(context);
 
       const result = await handlers.getAccountInfo({ confirm: true });
 
       expect(result.content).toBeDefined();
+      console.log('RESULT TEXT:', result.content[0].text);
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.status).toBe('AWAITING_AUTHENTICATION');
+      expect(payload.requiresAction).toBe(true);
+      expect(payload.url).toContain('5000');
     });
   });
 

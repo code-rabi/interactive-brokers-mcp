@@ -111,9 +111,9 @@ export const ForgetFlexQueryZodShape = {
 };
 
 // Full Zod Schemas (for validation if needed)
-export const AuthenticateZodSchema = z.object(AuthenticateZodShape);
+const AuthenticateZodSchema = z.object(AuthenticateZodShape);
 
-export const GetAccountInfoZodSchema = z.object(GetAccountInfoZodShape);
+const GetAccountInfoZodSchema = z.object(GetAccountInfoZodShape);
 
 export const GetPositionsZodSchema = z.object(GetPositionsZodShape);
 
@@ -141,7 +141,7 @@ export const GetLiveOrdersZodSchema = z.object(GetLiveOrdersZodShape);
 
 export const ConfirmOrderZodSchema = z.object(ConfirmOrderZodShape);
 
-export const GetAlertsZodSchema = z.object(GetAlertsZodShape);
+const GetAlertsZodSchema = z.object(GetAlertsZodShape);
 
 export const CreateAlertZodSchema = z.object(CreateAlertZodShape);
 
@@ -150,11 +150,11 @@ export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
 export const DeleteAlertZodSchema = z.object(DeleteAlertZodShape);
 
 // Flex Query Full Schemas
-export const GetFlexQueryZodSchema = z.object(GetFlexQueryZodShape);
+const GetFlexQueryZodSchema = z.object(GetFlexQueryZodShape);
 
-export const ListFlexQueriesZodSchema = z.object(ListFlexQueriesZodShape);
+const ListFlexQueriesZodSchema = z.object(ListFlexQueriesZodShape);
 
-export const ForgetFlexQueryZodSchema = z.object(ForgetFlexQueryZodShape);
+const ForgetFlexQueryZodSchema = z.object(ForgetFlexQueryZodShape);
 
 // ── TypeScript types (inferred from Zod schemas) ────────────────────────────
 export type AuthenticateInput = z.infer<typeof AuthenticateZodSchema>;
