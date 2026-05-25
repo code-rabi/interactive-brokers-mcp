@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as fs from 'fs';
 import { IBGatewayManager } from '../src/gateway-manager.js';
+import { PortUtils } from '../src/utils/port-utils.js';
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof fs>('fs');
@@ -91,5 +92,59 @@ describe('IBGatewayManager runtime platform resolution', () => {
     expect((IBGatewayManager as unknown as {
       resolveRuntimePlatform: (platform?: NodeJS.Platform, arch?: string) => string;
     }).resolveRuntimePlatform('linux', 'arm64')).toBe('linux-arm64-musl');
+  });
+});
+
+describe('IBGatewayManager existing gateway selection', () => {
+  const originalForceStandalone = process.env.IB_FORCE_STANDALONE_GATEWAY;
+
+  afterEach(() => {
+    if (originalForceStandalone === undefined) {
+      delete process.env.IB_FORCE_STANDALONE_GATEWAY;
+    } else {
+      process.env.IB_FORCE_STANDALONE_GATEWAY = originalForceStandalone;
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('skips existing gateway discovery when standalone mode is forced', async () => {
+    process.env.IB_FORCE_STANDALONE_GATEWAY = 'true';
+    const findExistingGatewaySpy = vi.spyOn(PortUtils, 'findExistingGateway');
+    const manager = new IBGatewayManager();
+
+    const port = await manager.quickCheckExistingGateway();
+
+    expect(port).toBeNull();
+    expect(findExistingGatewaySpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores an existing gateway candidate when it is not reachable', async () => {
+    process.env.IB_FORCE_STANDALONE_GATEWAY = 'false';
+    vi.spyOn(PortUtils, 'findExistingGateway').mockResolvedValue(5000);
+    const manager = new IBGatewayManager() as unknown as {
+      quickCheckExistingGateway: () => Promise<number | null>;
+      checkGatewayHealth: (port?: number) => Promise<boolean>;
+    };
+    const checkGatewayHealthSpy = vi.spyOn(manager, 'checkGatewayHealth').mockResolvedValue(false);
+
+    const port = await manager.quickCheckExistingGateway();
+
+    expect(port).toBeNull();
+    expect(checkGatewayHealthSpy).toHaveBeenCalledWith(5000);
+  });
+
+  it('reuses an existing gateway candidate when it is reachable', async () => {
+    process.env.IB_FORCE_STANDALONE_GATEWAY = 'false';
+    vi.spyOn(PortUtils, 'findExistingGateway').mockResolvedValue(5000);
+    const manager = new IBGatewayManager() as unknown as {
+      quickCheckExistingGateway: () => Promise<number | null>;
+      checkGatewayHealth: (port?: number) => Promise<boolean>;
+    };
+    const checkGatewayHealthSpy = vi.spyOn(manager, 'checkGatewayHealth').mockResolvedValue(true);
+
+    const port = await manager.quickCheckExistingGateway();
+
+    expect(port).toBe(5000);
+    expect(checkGatewayHealthSpy).toHaveBeenCalledWith(5000);
   });
 });

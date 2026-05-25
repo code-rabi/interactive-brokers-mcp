@@ -29,11 +29,13 @@ export class IBGatewayManager {
   private backgroundStartupPromise: Promise<void> | null = null;
   private spawnFailure: { reason: string; details?: string } | null = null;
   private static readonly STDERR_TAIL_BYTES = 4096;
+  private readonly forceStandaloneGateway: boolean;
 
   constructor() {
     this.gatewayDir = path.join(__dirname, '../ib-gateway');
     this.jreDir = path.join(__dirname, '../runtime');
     this.useStderr = !(process.env.MCP_HTTP_SERVER === 'true' || process.argv.includes('--http'));
+    this.forceStandaloneGateway = process.env.IB_FORCE_STANDALONE_GATEWAY === 'true';
     this.registerCleanupHandlers();
   }
 
@@ -44,8 +46,19 @@ export class IBGatewayManager {
 
 
   private async findExistingGateway(): Promise<number | null> {
+    if (this.forceStandaloneGateway) {
+      this.log('Standalone gateway mode enabled; skipping existing gateway discovery');
+      return null;
+    }
     this.log('🔍 Checking for existing Gateway instances...');
     const existingPort = await PortUtils.findExistingGateway();
+    if (existingPort) {
+      const isReachable = await this.checkGatewayHealth(existingPort);
+      if (!isReachable) {
+        this.log(`Gateway candidate on port ${existingPort} is not reachable; ignoring it`);
+        return null;
+      }
+    }
     if (existingPort) {
       this.log(`✅ Found existing Gateway on port ${existingPort}`);
     } else {
@@ -55,9 +68,20 @@ export class IBGatewayManager {
   }
 
   async quickCheckExistingGateway(): Promise<number | null> {
+    if (this.forceStandaloneGateway) {
+      this.log('Standalone gateway mode enabled; skipping quick existing gateway discovery');
+      return null;
+    }
     this.log('⚡ Quick check for existing Gateway instances...');
     try {
       const existingPort = await PortUtils.findExistingGateway();
+      if (existingPort) {
+        const isReachable = await this.checkGatewayHealth(existingPort);
+        if (!isReachable) {
+          this.log(`Gateway candidate on port ${existingPort} is not reachable; ignoring it`);
+          return null;
+        }
+      }
       if (existingPort) {
         this.log(`✅ Found existing Gateway on port ${existingPort}`);
       } else {
@@ -518,7 +542,7 @@ export class IBGatewayManager {
 
       try {
         // Try to connect to the gateway port
-        const response = await this.checkGatewayHealth();
+        const response = await this.checkGatewayHealth(this.currentPort);
         if (response) {
           this.log(`✅ IB Gateway is responding on port ${this.currentPort}`);
           return;
@@ -561,14 +585,14 @@ export class IBGatewayManager {
     return `Failed to spawn IB Gateway: ${error.message}`;
   }
 
-  private async checkGatewayHealth(): Promise<boolean> {
+  private async checkGatewayHealth(port: number = this.currentPort): Promise<boolean> {
     // Import https dynamically to avoid issues with module resolution
     const https = await import('https');
     
     return new Promise((resolve, reject) => {
       const options = {
         hostname: 'localhost',
-        port: this.currentPort,
+        port,
         path: '/',
         method: 'GET',
         rejectUnauthorized: false, // Accept self-signed certificates

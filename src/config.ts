@@ -6,6 +6,7 @@ dotenvConfig();
 export const config = {
   IB_GATEWAY_HOST: process.env.IB_GATEWAY_HOST || "localhost",
   IB_GATEWAY_PORT: parseInt(process.env.IB_GATEWAY_PORT || "5000"),
+  IB_FORCE_STANDALONE_GATEWAY: process.env.IB_FORCE_STANDALONE_GATEWAY === "true",
   IB_ACCOUNT: process.env.IB_ACCOUNT || "",
   IB_PASSWORD: process.env.IB_PASSWORD || "",
 

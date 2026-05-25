@@ -185,6 +185,7 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Headless Mode | `IB_HEADLESS_MODE` | `--ib-headless-mode` |
 | Paper Trading | `IB_PAPER_TRADING` | `--ib-paper-trading` |
 | Auth Timeout | `IB_AUTH_TIMEOUT` | `--ib-auth-timeout` |
+| Force standalone bundled gateway | `IB_FORCE_STANDALONE_GATEWAY` | N/A |
 | Flex Token | `IB_FLEX_TOKEN` | N/A |
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |
 
@@ -216,6 +217,11 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 - Use the web interface that opens automatically
 - Complete any required two-factor authentication
 - Try paper trading mode if live trading fails
+
+**Gateway Discovery Problems:**
+
+- If another IB Gateway is already listening on a local port but should not be reused, set `IB_FORCE_STANDALONE_GATEWAY=true`
+- Existing gateways are only reused when the MCP process can reach them over HTTPS; otherwise the bundled standalone gateway is started on an available port
 
 ## Support
 
