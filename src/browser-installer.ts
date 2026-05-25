@@ -1,6 +1,8 @@
 import { chromium, Browser } from 'playwright-core';
 import { Logger } from './logger.js';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 export class BrowserInstaller {
   static headless: boolean = true; // Set this to false to debug 
@@ -69,7 +71,49 @@ export class BrowserInstaller {
       }
     }
 
+    const playwrightBrowserPath = await this.findPlaywrightCacheBrowser();
+    if (playwrightBrowserPath) {
+      Logger.info(`🔍 Found Playwright cached browser: ${playwrightBrowserPath}`);
+      return playwrightBrowserPath;
+    }
+
     Logger.warn('⚠️ No system browser found, will try Playwright default');
+    return null;
+  }
+
+  private static async findPlaywrightCacheBrowser(): Promise<string | null> {
+    const cacheRoots = [
+      process.env.PLAYWRIGHT_BROWSERS_PATH,
+      path.join(os.homedir(), '.cache', 'ms-playwright'),
+    ].filter(Boolean) as string[];
+
+    for (const cacheRoot of cacheRoots) {
+      let entries: string[];
+      try {
+        entries = await fs.promises.readdir(cacheRoot);
+      } catch {
+        continue;
+      }
+
+      const chromiumDirs = entries
+        .filter((entry) => entry.startsWith('chromium-'))
+        .sort()
+        .reverse();
+
+      for (const entry of chromiumDirs) {
+        const candidates = [
+          path.join(cacheRoot, entry, 'chrome-linux64', 'chrome'),
+          path.join(cacheRoot, entry, 'chrome-linux', 'chrome'),
+        ];
+
+        for (const candidate of candidates) {
+          if (await this.isExecutableFile(candidate)) {
+            return candidate;
+          }
+        }
+      }
+    }
+
     return null;
   }
 
