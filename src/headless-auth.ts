@@ -15,13 +15,41 @@ export interface HeadlessAuthConfig {
 interface HeadlessAuthResult {
   success: boolean;
   message: string;
+  status?: 'SUCCESS' | 'WAITING_FOR_USER_2FA' | 'AUTH_FAILED' | 'TIMEOUT' | 'ERROR';
   waitingFor2FA?: boolean;
+  pushDelivered?: boolean;
+  browserKeptOpen?: boolean;
+  twoFactorMethod?: string;
   error?: string;
+}
+
+interface AuthenticationFailureState {
+  detected: boolean;
+  message?: string;
 }
 
 export class HeadlessAuthenticator {
   private browser: Browser | null = null;
   private page: Page | null = null;
+
+  private buildWaitingFor2FAResult(
+    twoFactorState: { message?: string; method?: string },
+    timeoutMs: number,
+  ): HeadlessAuthResult {
+    const pushDelivered = twoFactorState.method === 'ibkr_mobile_push';
+    return {
+      success: false,
+      status: 'WAITING_FOR_USER_2FA',
+      waitingFor2FA: true,
+      pushDelivered,
+      browserKeptOpen: true,
+      twoFactorMethod: twoFactorState.method,
+      message: pushDelivered
+        ? `${twoFactorState.message}. The browser session has been left open so mobile approval can still complete.`
+        : `${twoFactorState.message}. The browser session has been left open so you can complete this step.`,
+      error: `Timed out after ${Math.round(timeoutMs / 1000)}s while waiting for user two-factor authentication`,
+    };
+  }
 
   async authenticate(authConfig: HeadlessAuthConfig): Promise<HeadlessAuthResult> {
     try {
@@ -49,13 +77,25 @@ export class HeadlessAuthenticator {
       Logger.info('⏳ Waiting for login form...');
       await this.page.waitForSelector('input[name="user"], input[id="user"], input[type="text"]', { timeout: 30000 });
 
-      // Find and fill username field
-      const usernameSelector = 'input[name="user"], input[id="user"], input[type="text"]';
+      // IBKR periodically changes exact login field names. Prefer the current
+      // stable ids/names, then fall back to a visible text input.
+      const usernameSelector = [
+        'input#xyz-field-username',
+        'input[name="username"]',
+        'input[name="user"]',
+        'input[id="user"]',
+        'input[type="text"]:visible',
+      ].join(', ');
       await this.page.fill(usernameSelector, authConfig.username);
       Logger.info('✅ Username filled');
 
       // Find and fill password field
-      const passwordSelector = 'input[name="password"], input[id="password"], input[type="password"]';
+      const passwordSelector = [
+        'input#xyz-field-password',
+        'input[name="password"]',
+        'input[id="password"]',
+        'input[type="password"]:visible',
+      ].join(', ');
       await this.page.fill(passwordSelector, authConfig.password);
       Logger.info('✅ Password filled');
 
@@ -122,6 +162,7 @@ export class HeadlessAuthenticator {
               
               return {
                 success: true,
+                status: 'SUCCESS',
                 message: 'Headless authentication completed successfully. IB Client confirmed authentication.'
               };
             }
@@ -158,6 +199,7 @@ export class HeadlessAuthenticator {
 
                     return {
                       success: true,
+                      status: 'SUCCESS',
                       message: 'Headless authentication completed successfully. Brokerage session initialized.'
                     };
                   }
@@ -173,22 +215,28 @@ export class HeadlessAuthenticator {
 
               return {
                 success: true,
+                status: 'SUCCESS',
                 message: 'Headless browser login completed. No IB client was provided to verify REST brokerage authentication.'
               };
             }
           }
 
-          // Check for potential 2FA or other intermediate states
-          const has2FAIndicators = 
-            pageContent.includes('two-factor') ||
-            pageContent.includes('2FA') ||
-            pageContent.includes('authentication') ||
-            pageContent.includes('verification') ||
-            pageContent.includes('code') ||
-            currentUrl.includes('sso');
+          const authFailureState = await this.detectAuthenticationFailureState();
+          if (authFailureState.detected) {
+            Logger.warn(`❌ ${authFailureState.message}`);
+            await this.cleanup();
+            return {
+              success: false,
+              status: 'AUTH_FAILED',
+              message: 'IBKR rejected the submitted login credentials or authentication attempt.',
+              error: authFailureState.message,
+            };
+          }
 
-          if (has2FAIndicators) {
-            Logger.info('🔐 Two-factor authentication detected - continuing to wait...');
+          const twoFactorState = await this.detectTwoFactorState();
+
+          if (twoFactorState.detected) {
+            Logger.info(`🔐 ${twoFactorState.message} - continuing to wait...`);
           } else {
             Logger.info(`🔍 Still waiting for authentication completion... (${Math.round((Date.now() - startTime) / 1000)}s elapsed)`);
           }
@@ -198,11 +246,19 @@ export class HeadlessAuthenticator {
         }
       }
 
-      // Timeout reached without seeing success message
+      const finalTwoFactorState: { detected: boolean; message?: string; method?: string } =
+        await this.detectTwoFactorState().catch(() => ({ detected: false }));
+      if (finalTwoFactorState.detected) {
+        Logger.warn(`⏰ Authentication timeout reached while ${finalTwoFactorState.message}`);
+        return this.buildWaitingFor2FAResult(finalTwoFactorState, maxWaitTime);
+      }
+
       Logger.warn('⏰ Authentication timeout reached without seeing "Client login succeeds"');
+      await this.cleanup();
       
       return {
         success: false,
+        status: 'TIMEOUT',
         message: 'Authentication timeout. Did not detect "Client login succeeds" message within the timeout period.',
         error: 'Authentication timeout - success message not detected'
       };
@@ -221,10 +277,113 @@ export class HeadlessAuthenticator {
       
       return {
         success: false,
+        status: 'ERROR',
         message: 'Headless authentication failed',
         error: `${errorMessage}\n\nStack trace:\n${errorDetails}\n\nEnvironment: ${process.platform}-${process.arch}, Node: ${process.version}`
       };
     }
+  }
+
+  private async detectAuthenticationFailureState(): Promise<AuthenticationFailureState> {
+    if (!this.page) {
+      return { detected: false };
+    }
+
+    const state = await this.page.evaluate(() => {
+      const doc = (globalThis as any).document;
+      const visibleText = (doc.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      const visibleAlerts = [...doc.querySelectorAll('[role="alert"], .error, .alert, .message, .xyz-error')]
+        .filter((el: any) => Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+        .map((el: any) => (el.innerText || el.textContent || '').trim())
+        .join(' ');
+
+      return { visibleText, visibleAlerts };
+    });
+
+    const text = `${state.visibleText} ${state.visibleAlerts}`.toLowerCase();
+    const failureIndicators = [
+      'invalid username',
+      'invalid password',
+      'incorrect username',
+      'incorrect password',
+      'invalid credentials',
+      'credentials are invalid',
+      'username or password',
+      'login failed',
+      'authentication failed',
+      'account is locked',
+      'too many failed',
+    ];
+    const matchedIndicator = failureIndicators.find((indicator) => text.includes(indicator));
+
+    if (!matchedIndicator) {
+      return { detected: false };
+    }
+
+    return {
+      detected: true,
+      message: `IBKR login page reported ${matchedIndicator}`,
+    };
+  }
+
+  private async detectTwoFactorState(): Promise<{ detected: boolean; message?: string; method?: string }> {
+    if (!this.page) {
+      return { detected: false };
+    }
+
+    const state = await this.page.evaluate(() => {
+      const doc = (globalThis as any).document;
+      const visibleText = (doc.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      const visibleButtons = [...doc.querySelectorAll('button, input[type="submit"], input[type="button"]')]
+        .filter((el: any) => Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+        .map((el: any) => (el.innerText || el.value || '').trim())
+        .join(' ');
+
+      return { visibleText, visibleButtons };
+    });
+
+    const text = `${state.visibleText} ${state.visibleButtons}`.toLowerCase();
+    if (text.includes('open the ibkr notification') || text.includes('sent you a notification')) {
+      return {
+        detected: true,
+        method: 'ibkr_mobile_push',
+        message: 'IBKR reports that it sent a mobile notification and is waiting for approval'
+      };
+    }
+
+    if (text.includes('resend notification')) {
+      return {
+        detected: true,
+        method: 'ibkr_mobile_push',
+        message: 'IBKR is showing the mobile notification approval screen'
+      };
+    }
+
+    if (text.includes('temporary security code') || text.includes('security code') || text.includes('response code')) {
+      return {
+        detected: true,
+        method: 'security_code',
+        message: 'IBKR is waiting for a security code challenge response'
+      };
+    }
+
+    if (text.includes('select second factor device') || text.includes('text voice email')) {
+      return {
+        detected: true,
+        method: 'factor_selection',
+        message: 'IBKR is waiting for second-factor method selection'
+      };
+    }
+
+    if (text.includes('two-factor') || text.includes('2fa') || text.includes('verification')) {
+      return {
+        detected: true,
+        method: 'unknown_2fa',
+        message: 'IBKR is waiting on a two-factor authentication step'
+      };
+    }
+
+    return { detected: false };
   }
 
 
@@ -233,6 +392,7 @@ export class HeadlessAuthenticator {
     if (!this.page) {
       return {
         success: false,
+        status: 'ERROR',
         message: 'No active browser session',
         error: 'Browser session not found'
       };
@@ -254,6 +414,7 @@ export class HeadlessAuthenticator {
               
               return {
                 success: true,
+                status: 'SUCCESS',
                 message: 'Authentication completed successfully. IB Client confirmed authentication.'
               };
             }
@@ -281,6 +442,7 @@ export class HeadlessAuthenticator {
                   await this.cleanup();
                   return {
                     success: true,
+                    status: 'SUCCESS',
                     message: 'Authentication completed successfully. Brokerage session initialized.'
                   };
                 }
@@ -295,7 +457,19 @@ export class HeadlessAuthenticator {
             
             return {
               success: true,
+              status: 'SUCCESS',
               message: 'Authentication completed successfully. Client login succeeds message detected, but REST auth was not verified because no IB client was provided.'
+            };
+          }
+
+          const authFailureState = await this.detectAuthenticationFailureState();
+          if (authFailureState.detected) {
+            await this.cleanup();
+            return {
+              success: false,
+              status: 'AUTH_FAILED',
+              message: 'IBKR rejected the login credentials or authentication attempt.',
+              error: authFailureState.message,
             };
           }
         } catch (pageError) {
@@ -308,10 +482,17 @@ export class HeadlessAuthenticator {
 
       // Timeout reached
       Logger.warn('⏰ 2FA timeout reached');
+      const finalTwoFactorState: { detected: boolean; message?: string; method?: string } =
+        await this.detectTwoFactorState().catch(() => ({ detected: false }));
+      if (finalTwoFactorState.detected) {
+        return this.buildWaitingFor2FAResult(finalTwoFactorState, maxWaitTime);
+      }
+
       await this.cleanup();
       
       return {
         success: false,
+        status: 'TIMEOUT',
         message: 'Two-factor authentication timeout. Please try again.',
         error: 'Authentication timeout'
       };
@@ -325,6 +506,7 @@ export class HeadlessAuthenticator {
       
       return {
         success: false,
+        status: 'ERROR',
         message: 'Error while waiting for two-factor authentication',
         error: `${errorMessage}\n\nStack trace:\n${errorDetails}`
       };

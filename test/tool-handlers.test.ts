@@ -345,11 +345,13 @@ describe('ToolHandlers', () => {
       const result = await handlers.getAccountInfo({ confirm: true });
 
       expect(result.content).toBeDefined();
-      console.log('RESULT TEXT:', result.content[0].text);
       const payload = JSON.parse(result.content[0].text);
       expect(payload.status).toBe('AWAITING_AUTHENTICATION');
       expect(payload.requiresAction).toBe(true);
       expect(payload.url).toContain('5000');
+      expect(payload.authStarted).toBe(true);
+      expect(payload.notificationVerified).toBe(false);
+      expect(payload.message).not.toContain('push notification');
     });
   });
 
@@ -823,4 +825,3 @@ describe('ToolHandlers', () => {
     });
   });
 });
-

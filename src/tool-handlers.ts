@@ -137,7 +137,9 @@ export class ToolHandlers {
       const p = authenticator.authenticate(authConfig);
       if (p && typeof p.then === "function") {
         p.then(async (result) => {
-          await authenticator.close().catch(() => {});
+          if (!result.browserKeptOpen) {
+            await authenticator.close().catch(() => {});
+          }
           Logger.info(`🎯 Background headless authentication completed: success=${result.success}`);
         }).catch(async (err) => {
           await authenticator.close().catch(() => {});
@@ -148,9 +150,11 @@ export class ToolHandlers {
       // Throw a standard Error that formatError knows how to parse or that is easy to check
       const payload = {
         status: "AWAITING_AUTHENTICATION",
-        message: `Authentication has been automatically triggered in the background. Please check your mobile device for the IB Key 2FA push notification or log in manually at ${authUrl} to authenticate. Once completed, re-run this command.`,
+        message: `Headless login has been started in the background. IBKR may ask for mobile approval, a security code, or second-factor method selection. Complete the visible IBKR authentication step at ${authUrl}, then re-run this command.`,
         url: authUrl,
-        requiresAction: true
+        requiresAction: true,
+        authStarted: true,
+        notificationVerified: false
       };
       
       return {
@@ -323,8 +327,11 @@ export class ToolHandlers {
           const authenticator = new HeadlessAuthenticator();
           const result = await authenticator.authenticate(authConfig);
 
-          // Authentication completed (success or failure) - no separate 2FA handling needed
-          await authenticator.close();
+          // Keep the browser alive only when the authenticator reports a user-action
+          // 2FA state that can still be completed after this tool response.
+          if (!result.browserKeptOpen) {
+            await authenticator.close();
+          }
           
           return {
             content: [

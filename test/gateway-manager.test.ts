@@ -97,12 +97,18 @@ describe('IBGatewayManager runtime platform resolution', () => {
 
 describe('IBGatewayManager existing gateway selection', () => {
   const originalForceStandalone = process.env.IB_FORCE_STANDALONE_GATEWAY;
+  const originalGatewayPort = process.env.IB_GATEWAY_PORT;
 
   afterEach(() => {
     if (originalForceStandalone === undefined) {
       delete process.env.IB_FORCE_STANDALONE_GATEWAY;
     } else {
       process.env.IB_FORCE_STANDALONE_GATEWAY = originalForceStandalone;
+    }
+    if (originalGatewayPort === undefined) {
+      delete process.env.IB_GATEWAY_PORT;
+    } else {
+      process.env.IB_GATEWAY_PORT = originalGatewayPort;
     }
     vi.restoreAllMocks();
   });
@@ -146,5 +152,35 @@ describe('IBGatewayManager existing gateway selection', () => {
 
     expect(port).toBe(5000);
     expect(checkGatewayHealthSpy).toHaveBeenCalledWith(5000);
+  });
+
+  it('reuses a reachable configured port before process-name discovery', async () => {
+    process.env.IB_FORCE_STANDALONE_GATEWAY = 'false';
+    process.env.IB_GATEWAY_PORT = '5002';
+    const findExistingGatewaySpy = vi.spyOn(PortUtils, 'findExistingGateway').mockResolvedValue(null);
+    const manager = new IBGatewayManager() as unknown as {
+      quickCheckExistingGateway: () => Promise<number | null>;
+      checkGatewayHealth: (port?: number) => Promise<boolean>;
+    };
+    const checkGatewayHealthSpy = vi
+      .spyOn(manager, 'checkGatewayHealth')
+      .mockImplementation(async (port?: number) => port === 5002);
+
+    const port = await manager.quickCheckExistingGateway();
+
+    expect(port).toBe(5002);
+    expect(checkGatewayHealthSpy).toHaveBeenCalledWith(5002);
+    expect(findExistingGatewaySpy).not.toHaveBeenCalled();
+  });
+
+  it('treats unauthenticated API responses as a live Gateway health signal', () => {
+    const manager = new IBGatewayManager() as unknown as {
+      isLiveGatewayResponse: (pathname: string, statusCode?: number) => boolean;
+    };
+
+    expect(manager.isLiveGatewayResponse('/v1/api/iserver/auth/status', 401)).toBe(true);
+    expect(manager.isLiveGatewayResponse('/v1/api/iserver/auth/status', 403)).toBe(true);
+    expect(manager.isLiveGatewayResponse('/v1/api/iserver/auth/status', 404)).toBe(false);
+    expect(manager.isLiveGatewayResponse('/', 404)).toBe(false);
   });
 });

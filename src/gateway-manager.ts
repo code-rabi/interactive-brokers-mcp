@@ -25,10 +25,17 @@ export class IBGatewayManager {
   private isReady = false;
   private useStderr: boolean;
   private cleanupHandlersRegistered = false;
-  private currentPort: number = 5000;
+  private currentPort: number = IBGatewayManager.getConfiguredGatewayPort();
   private backgroundStartupPromise: Promise<void> | null = null;
   private spawnFailure: { reason: string; details?: string } | null = null;
   private static readonly STDERR_TAIL_BYTES = 4096;
+  private static readonly DEFAULT_GATEWAY_PORT = 5000;
+  private static readonly COMMON_GATEWAY_PORTS = [5000, 5001, 5002, 5003, 5004, 5005];
+  private static readonly GATEWAY_HEALTH_PATHS = [
+    '/v1/api/iserver/auth/status',
+    '/v1/api/tickle',
+    '/',
+  ];
   private readonly forceStandaloneGateway: boolean;
 
   constructor() {
@@ -45,12 +52,45 @@ export class IBGatewayManager {
 
 
 
+  private static getConfiguredGatewayPort(): number {
+    const parsedPort = Number.parseInt(process.env.IB_GATEWAY_PORT || '', 10);
+    return Number.isFinite(parsedPort) && parsedPort > 0
+      ? parsedPort
+      : IBGatewayManager.DEFAULT_GATEWAY_PORT;
+  }
+
+  private getGatewayProbePorts(): number[] {
+    return Array.from(new Set([
+      this.currentPort,
+      IBGatewayManager.getConfiguredGatewayPort(),
+      ...IBGatewayManager.COMMON_GATEWAY_PORTS,
+    ].filter((port) => Number.isInteger(port) && port > 0 && port < 65536)));
+  }
+
+  private async findReachableGatewayPort(): Promise<number | null> {
+    for (const port of this.getGatewayProbePorts()) {
+      const isReachable = await this.checkGatewayHealth(port);
+      if (isReachable) {
+        return port;
+      }
+    }
+
+    return null;
+  }
+
   private async findExistingGateway(): Promise<number | null> {
     if (this.forceStandaloneGateway) {
       this.log('Standalone gateway mode enabled; skipping existing gateway discovery');
       return null;
     }
     this.log('🔍 Checking for existing Gateway instances...');
+
+    const reachablePort = await this.findReachableGatewayPort();
+    if (reachablePort) {
+      this.log(`✅ Found reachable Gateway on port ${reachablePort}`);
+      return reachablePort;
+    }
+
     const existingPort = await PortUtils.findExistingGateway();
     if (existingPort) {
       const isReachable = await this.checkGatewayHealth(existingPort);
@@ -74,6 +114,12 @@ export class IBGatewayManager {
     }
     this.log('⚡ Quick check for existing Gateway instances...');
     try {
+      const reachablePort = await this.findReachableGatewayPort();
+      if (reachablePort) {
+        this.log(`✅ Found reachable Gateway on port ${reachablePort}`);
+        return reachablePort;
+      }
+
       const existingPort = await PortUtils.findExistingGateway();
       if (existingPort) {
         const isReachable = await this.checkGatewayHealth(existingPort);
@@ -399,7 +445,7 @@ export class IBGatewayManager {
       
       // Check port availability for new Gateway
       this.log('🔍 Checking port availability for new Gateway...');
-      const defaultPort = 5000;
+      const defaultPort = IBGatewayManager.getConfiguredGatewayPort();
       
       if (await PortUtils.isPortAvailable(defaultPort)) {
         this.currentPort = defaultPort;
@@ -453,6 +499,7 @@ export class IBGatewayManager {
         '--conf', `../${configFile}`
       ], {
         cwd: path.join(this.gatewayDir, 'clientportal.gw'),
+        detached: true,
         env: {
           ...process.env,
           JAVA_HOME: bundledJavaHome,
@@ -460,6 +507,8 @@ export class IBGatewayManager {
         },
         stdio: ['ignore', 'pipe', 'pipe']
       });
+
+      this.gatewayProcess.unref();
 
       // Buffer the tail of stderr so we can include it in a failure reason if the process
       // dies before the gateway's HTTP port comes up.
@@ -585,22 +634,54 @@ export class IBGatewayManager {
     return `Failed to spawn IB Gateway: ${error.message}`;
   }
 
-  private async checkGatewayHealth(port: number = this.currentPort): Promise<boolean> {
-    // Import https dynamically to avoid issues with module resolution
-    const https = await import('https');
-    
-    return new Promise((resolve, reject) => {
+  private isLiveGatewayResponse(pathname: string, statusCode?: number): boolean {
+    if (!statusCode) {
+      return false;
+    }
+
+    if (pathname.startsWith('/v1/api/')) {
+      // Unauthenticated Client Portal Gateway API endpoints commonly return 401.
+      // That still proves the Gateway is alive and should be reused.
+      return (
+        statusCode === 200 ||
+        statusCode === 204 ||
+        statusCode === 302 ||
+        statusCode === 401 ||
+        statusCode === 403 ||
+        statusCode === 405
+      );
+    }
+
+    return (
+      statusCode === 200 ||
+      statusCode === 301 ||
+      statusCode === 302 ||
+      statusCode === 303 ||
+      statusCode === 307 ||
+      statusCode === 308 ||
+      statusCode === 401 ||
+      statusCode === 403
+    );
+  }
+
+  private async probeGatewayEndpoint(
+    https: typeof import('https'),
+    port: number,
+    pathname: string,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
       const options = {
         hostname: 'localhost',
         port,
-        path: '/',
+        path: pathname,
         method: 'GET',
         rejectUnauthorized: false, // Accept self-signed certificates
-        timeout: 5000
+        timeout: 5000,
       };
 
       const req = https.request(options, (res) => {
-        resolve(res.statusCode === 200 || res.statusCode === 401 || res.statusCode === 302);
+        res.resume();
+        resolve(this.isLiveGatewayResponse(pathname, res.statusCode));
       });
 
       req.on('error', () => {
@@ -616,6 +697,20 @@ export class IBGatewayManager {
     });
   }
 
+  private async checkGatewayHealth(port: number = this.currentPort): Promise<boolean> {
+    // Import https dynamically to avoid issues with module resolution
+    const https = await import('https');
+
+    for (const pathname of IBGatewayManager.GATEWAY_HEALTH_PATHS) {
+      const isReachable = await this.probeGatewayEndpoint(https, port, pathname);
+      if (isReachable) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   async stopGateway(): Promise<void> {
     // Don't actually stop the gateway - just disconnect from it
     this.log('🔗 Disconnecting from IB Gateway (leaving it running)...');
@@ -628,7 +723,7 @@ export class IBGatewayManager {
   }
 
   isGatewayReady(): boolean {
-    return this.isReady && this.gatewayProcess !== null;
+    return this.isReady;
   }
 
   getGatewayUrl(): string {
