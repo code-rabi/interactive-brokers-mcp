@@ -28,7 +28,7 @@ describe('IBClient', () => {
     
     vi.mocked(axios.create).mockReturnValue(mockAxiosInstance as any);
     
-    client = new IBClient(mockConfig);
+    client = new IBClient({ ...mockConfig });
   });
 
   afterEach(() => {
@@ -622,6 +622,9 @@ describe('IBClient', () => {
         expect.stringContaining('machineId=71a482fc'),
         expect.any(Object)
       );
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        'https://localhost:5000/v1/portal/iserver/reauthenticate?force=true'
+      );
       expect(mockAuthClient.post).toHaveBeenCalledWith('/iserver/reauthenticate');
       expect(mockAuthClient.post).toHaveBeenCalledWith('/tickle');
     });
@@ -758,4 +761,3 @@ describe('IBClient', () => {
     });
   });
 });
-

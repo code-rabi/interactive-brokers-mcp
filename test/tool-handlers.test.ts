@@ -346,10 +346,11 @@ describe('ToolHandlers', () => {
 
       expect(result.content).toBeDefined();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.status).toBe('AWAITING_AUTHENTICATION');
+      expect(payload.status).toBe('AUTHENTICATION_STARTED');
       expect(payload.requiresAction).toBe(true);
       expect(payload.url).toContain('5000');
       expect(payload.authStarted).toBe(true);
+      expect(payload.twoFactorPending).toBe(false);
       expect(payload.notificationVerified).toBe(false);
       expect(payload.message).not.toContain('push notification');
     });

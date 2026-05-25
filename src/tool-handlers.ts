@@ -149,11 +149,12 @@ export class ToolHandlers {
 
       // Throw a standard Error that formatError knows how to parse or that is easy to check
       const payload = {
-        status: "AWAITING_AUTHENTICATION",
-        message: `Headless login has been started in the background. IBKR may ask for mobile approval, a security code, or second-factor method selection. Complete the visible IBKR authentication step at ${authUrl}, then re-run this command.`,
+        status: "AUTHENTICATION_STARTED",
+        message: `Headless login has been started in the background, but no 2FA challenge has been verified yet. Re-run this command after the login completes, or open ${authUrl} to inspect the current IBKR authentication screen.`,
         url: authUrl,
         requiresAction: true,
         authStarted: true,
+        twoFactorPending: false,
         notificationVerified: false
       };
       

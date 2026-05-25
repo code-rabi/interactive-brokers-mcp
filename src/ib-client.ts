@@ -381,6 +381,11 @@ export class IBClient {
       }
 
       await sleep(1000);
+      const gatewayBaseUrl = this.baseUrl.replace(/\/v1\/api\/?$/, "");
+      await tryRequest(`${labelPrefix} POST /v1/portal/iserver/reauthenticate?force=true`, () =>
+        client.post(`${gatewayBaseUrl}/v1/portal/iserver/reauthenticate?force=true`)
+      );
+      await sleep(1000);
       await tryRequest(`${labelPrefix} POST /v1/api/iserver/reauthenticate`, () => client.post("/iserver/reauthenticate"));
       await sleep(1000);
       await tryRequest(`${labelPrefix} POST /v1/api/tickle`, () => client.post("/tickle"));
