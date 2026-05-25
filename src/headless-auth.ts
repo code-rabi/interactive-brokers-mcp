@@ -99,6 +99,9 @@ export class HeadlessAuthenticator {
       Logger.info('🔄 Submitting login form...');
       await this.page.click(submitSelector);
 
+      // Indicate that credentials form was filled and successfully submitted
+      let credentialsSubmitted = true;
+
       // Wait for the authentication process to complete using IB client polling
       Logger.info('⏳ Waiting for authentication to complete...');
       
@@ -132,7 +135,7 @@ export class HeadlessAuthenticator {
           const currentUrl = this.page.url();
           const pageContent = await this.page.content();
 
-          if (authConfig.ibClient) {
+          if (authConfig.ibClient && credentialsSubmitted) {
             const cookies = await this.page.context().cookies();
             authConfig.ibClient.setSessionCookies(cookies);
           }
