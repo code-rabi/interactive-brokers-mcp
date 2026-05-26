@@ -42,6 +42,16 @@ function parseArgs(): z.infer<typeof configSchema> {
           Logger.debug(`🔍 Set IB_AUTH_TIMEOUT to: ${nextArg}`);
           i++;
           break;
+        case 'ib-auth-wait-seconds':
+          args.IB_AUTH_WAIT_SECONDS = parseInt(nextArg);
+          Logger.debug(`🔍 Set IB_AUTH_WAIT_SECONDS to: ${nextArg}`);
+          i++;
+          break;
+        case 'ib-auth-poll-seconds':
+          args.IB_AUTH_POLL_SECONDS = parseInt(nextArg);
+          Logger.debug(`🔍 Set IB_AUTH_POLL_SECONDS to: ${nextArg}`);
+          i++;
+          break;
         case 'ib-headless-mode':
           // Support both --ib-headless-mode (boolean flag) and --ib-headless-mode=true/false
           if (nextArg && !nextArg.startsWith('--')) {
@@ -96,6 +106,14 @@ function parseArgs(): z.infer<typeof configSchema> {
           args.IB_AUTH_TIMEOUT = parseInt(value);
           Logger.debug(`🔍 Set IB_AUTH_TIMEOUT to: ${value}`);
           break;
+        case 'ib-auth-wait-seconds':
+          args.IB_AUTH_WAIT_SECONDS = parseInt(value);
+          Logger.debug(`🔍 Set IB_AUTH_WAIT_SECONDS to: ${value}`);
+          break;
+        case 'ib-auth-poll-seconds':
+          args.IB_AUTH_POLL_SECONDS = parseInt(value);
+          Logger.debug(`🔍 Set IB_AUTH_POLL_SECONDS to: ${value}`);
+          break;
         case 'ib-headless-mode':
           args.IB_HEADLESS_MODE = value.toLowerCase() === 'true';
           Logger.debug(`🔍 Set IB_HEADLESS_MODE to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
@@ -123,6 +141,8 @@ export const configSchema = z.object({
   IB_USERNAME: z.string().optional(),
   IB_PASSWORD_AUTH: z.string().optional(),
   IB_AUTH_TIMEOUT: z.number().optional(),
+  IB_AUTH_WAIT_SECONDS: z.number().optional(),
+  IB_AUTH_POLL_SECONDS: z.number().optional(),
   IB_HEADLESS_MODE: z.boolean().optional(),
 
   // Paper trading configuration
@@ -287,6 +307,8 @@ if (isMainModule) {
     IB_USERNAME: process.env.IB_USERNAME,
     IB_PASSWORD_AUTH: process.env.IB_PASSWORD_AUTH || process.env.IB_PASSWORD,
     IB_AUTH_TIMEOUT: process.env.IB_AUTH_TIMEOUT ? parseInt(process.env.IB_AUTH_TIMEOUT) : undefined,
+    IB_AUTH_WAIT_SECONDS: process.env.IB_AUTH_WAIT_SECONDS ? parseInt(process.env.IB_AUTH_WAIT_SECONDS) : undefined,
+    IB_AUTH_POLL_SECONDS: process.env.IB_AUTH_POLL_SECONDS ? parseInt(process.env.IB_AUTH_POLL_SECONDS) : undefined,
     IB_HEADLESS_MODE: process.env.IB_HEADLESS_MODE === 'true',
     IB_READ_ONLY_MODE: process.env.IB_READ_ONLY_MODE === 'true',
 

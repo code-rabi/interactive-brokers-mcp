@@ -106,8 +106,10 @@ credentials without opening a browser window. This is useful for:
 
 **Important**: Even in headless mode, Interactive Brokers may still require
 two-factor authentication (2FA). When 2FA is triggered, the headless
-authentication will wait for you to complete the 2FA process through your
-configured method (mobile app, SMS, etc.) before proceeding.
+authentication will wait up to 60 seconds for you to complete the 2FA process
+through your configured method (mobile app, SMS, etc.) before returning an
+`AUTHENTICATION_PENDING` response. Wait for approval to complete, then check
+account info again.
 
 To enable paper trading, add `"IB_PAPER_TRADING": "true"` to your environment variables:
 
@@ -185,6 +187,8 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Headless Mode | `IB_HEADLESS_MODE` | `--ib-headless-mode` |
 | Paper Trading | `IB_PAPER_TRADING` | `--ib-paper-trading` |
 | Auth Timeout | `IB_AUTH_TIMEOUT` | `--ib-auth-timeout` |
+| Auth Wait Seconds | `IB_AUTH_WAIT_SECONDS` | `--ib-auth-wait-seconds` |
+| Auth Poll Seconds | `IB_AUTH_POLL_SECONDS` | `--ib-auth-poll-seconds` |
 | Force standalone bundled gateway | `IB_FORCE_STANDALONE_GATEWAY` | N/A |
 | Flex Token | `IB_FLEX_TOKEN` | N/A |
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |

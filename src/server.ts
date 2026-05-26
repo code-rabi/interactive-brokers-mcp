@@ -11,6 +11,8 @@ export const configSchema = z.object({
   IB_USERNAME: z.string().optional(),
   IB_PASSWORD_AUTH: z.string().optional(),
   IB_AUTH_TIMEOUT: z.number().optional(),
+  IB_AUTH_WAIT_SECONDS: z.number().optional(),
+  IB_AUTH_POLL_SECONDS: z.number().optional(),
   IB_HEADLESS_MODE: z.boolean().optional(),
 
   // Paper trading configuration
@@ -85,7 +87,6 @@ export function createIBMCPServer({ config: userConfig }: { config: z.infer<type
 
   return server;
 }
-
 
 
 

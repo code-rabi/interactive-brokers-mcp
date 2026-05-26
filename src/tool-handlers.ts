@@ -42,6 +42,18 @@ type AuthGuardResult =
   | { ok: true }
   | { ok: false; result: ToolHandlerResult };
 
+type HeadlessAuthOutcome = {
+  success: boolean;
+  status?: string;
+  message?: string;
+  error?: string;
+  browserKeptOpen?: boolean;
+};
+
+const DEFAULT_AUTH_WAIT_SECONDS = 60;
+const DEFAULT_AUTH_POLL_SECONDS = 5;
+const DEFAULT_AUTH_CHECK_AGAIN_SECONDS = 10;
+
 export class ToolHandlers {
   private context: ToolHandlerContext;
 
@@ -94,6 +106,112 @@ export class ToolHandlers {
     return this.textResult(JSON.stringify(payload, null, 2));
   }
 
+  private getAuthWaitOptions(): { maxWaitSeconds: number; pollSeconds: number } {
+    const configuredWait = Number(this.context.config.IB_AUTH_WAIT_SECONDS);
+    const configuredPoll = Number(this.context.config.IB_AUTH_POLL_SECONDS);
+
+    const maxWaitSeconds =
+      Number.isFinite(configuredWait) && configuredWait >= 0
+        ? configuredWait
+        : DEFAULT_AUTH_WAIT_SECONDS;
+    const pollSeconds =
+      Number.isFinite(configuredPoll) && configuredPoll > 0
+        ? configuredPoll
+        : DEFAULT_AUTH_POLL_SECONDS;
+
+    return { maxWaitSeconds, pollSeconds };
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private buildAwaitingAuthenticationPayload(
+    authUrl: string,
+    maxWaitSeconds: number,
+    waitedSeconds: number,
+  ): Record<string, unknown> {
+    return {
+      status: "AUTHENTICATION_PENDING",
+      pendingAction: true,
+      requiresUserAction: true,
+      checkAgainSeconds: DEFAULT_AUTH_CHECK_AGAIN_SECONDS,
+      maxWaitSeconds,
+      waitedSeconds,
+      url: authUrl,
+      userAction: "Approve the IBKR two-factor authentication challenge.",
+      message: "IBKR authentication is still pending.",
+      nextInstruction: `Wait ${DEFAULT_AUTH_CHECK_AGAIN_SECONDS} seconds, then check account info again.`,
+    };
+  }
+
+  private async waitForHeadlessAuthentication(
+    authPromise: Promise<HeadlessAuthOutcome>,
+    maxWaitSeconds: number,
+    pollSeconds: number,
+  ): Promise<{ authenticated: boolean; outcome?: HeadlessAuthOutcome; waitedSeconds: number }> {
+    const startedAt = Date.now();
+    const deadline = startedAt + maxWaitSeconds * 1000;
+    let outcome: HeadlessAuthOutcome | undefined;
+
+    authPromise
+      .then((result) => {
+        outcome = result;
+      })
+      .catch((error) => {
+        outcome = {
+          success: false,
+          status: "ERROR",
+          message: "Headless authentication failed.",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      });
+
+    const checkAuthenticated = async (): Promise<boolean> => {
+      try {
+        return await this.context.ibClient.checkAuthenticationStatus();
+      } catch (error) {
+        Logger.debug("[AUTH-WAIT] Auth status check failed while waiting:", error);
+        return false;
+      }
+    };
+
+    while (Date.now() < deadline) {
+      if (outcome?.success || await checkAuthenticated()) {
+        return {
+          authenticated: true,
+          outcome,
+          waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        };
+      }
+
+      if (outcome && outcome.status !== "WAITING_FOR_USER_2FA") {
+        return {
+          authenticated: false,
+          outcome,
+          waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        };
+      }
+
+      const remainingMs = deadline - Date.now();
+      await this.sleep(Math.min(pollSeconds * 1000, remainingMs));
+    }
+
+    if (outcome?.success || await checkAuthenticated()) {
+      return {
+        authenticated: true,
+        outcome,
+        waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+      };
+    }
+
+    return {
+      authenticated: false,
+      outcome,
+      waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+    };
+  }
+
   // Authentication management
   private async ensureAuth(): Promise<AuthGuardResult> {
     // Ensure Gateway is ready first
@@ -115,9 +233,12 @@ export class ToolHandlers {
           ok: false,
           result: this.jsonResult({
             success: false,
-            message: "Headless mode is enabled but authentication credentials are missing.",
-            error: "Set IB_USERNAME and IB_PASSWORD_AUTH to allow automatic headless authentication.",
-            authUrl,
+            status: "AUTHENTICATION_CONFIGURATION_REQUIRED",
+            pendingAction: false,
+            requiresUserAction: true,
+            message: "Headless authentication credentials are missing.",
+            nextInstruction: "Set IB_USERNAME and IB_PASSWORD_AUTH, then check account info again.",
+            url: authUrl,
           }),
         };
       }
@@ -132,9 +253,9 @@ export class ToolHandlers {
       };
 
       // Trigger authentication in the background (non-blocking)
-      Logger.info("⚡ Background headless authentication triggered...");
+      Logger.info("⚡ Headless authentication triggered; waiting briefly for user approval...");
       const authenticator = new HeadlessAuthenticator();
-      const p = authenticator.authenticate(authConfig);
+      const p = authenticator.authenticate(authConfig) as Promise<HeadlessAuthOutcome>;
       if (p && typeof p.then === "function") {
         p.then(async (result) => {
           if (!result.browserKeptOpen) {
@@ -147,16 +268,33 @@ export class ToolHandlers {
         });
       }
 
-      // Throw a standard Error that formatError knows how to parse or that is easy to check
-      const payload = {
-        status: "AUTHENTICATION_STARTED",
-        message: `Headless login has been started in the background, but no 2FA challenge has been verified yet. Re-run this command after the login completes, or open ${authUrl} to inspect the current IBKR authentication screen.`,
-        url: authUrl,
-        requiresAction: true,
-        authStarted: true,
-        twoFactorPending: false,
-        notificationVerified: false
-      };
+      const { maxWaitSeconds, pollSeconds } = this.getAuthWaitOptions();
+      const waitResult = await this.waitForHeadlessAuthentication(p, maxWaitSeconds, pollSeconds);
+
+      if (waitResult.authenticated) {
+        return { ok: true };
+      }
+
+      if (waitResult.outcome && waitResult.outcome.status !== "WAITING_FOR_USER_2FA") {
+        return {
+          ok: false,
+          result: this.jsonResult({
+            success: false,
+            status: waitResult.outcome.status || "AUTHENTICATION_FAILED",
+            pendingAction: false,
+            requiresUserAction: true,
+            message: waitResult.outcome.message || "Headless authentication failed.",
+            error: waitResult.outcome.error,
+            url: authUrl,
+          }),
+        };
+      }
+
+      const payload = this.buildAwaitingAuthenticationPayload(
+        authUrl,
+        maxWaitSeconds,
+        waitResult.waitedSeconds,
+      );
       
       return {
         ok: false,

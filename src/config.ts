@@ -14,6 +14,8 @@ export const config = {
   IB_USERNAME: process.env.IB_USERNAME || "",
   IB_PASSWORD_AUTH: process.env.IB_PASSWORD_AUTH || process.env.IB_PASSWORD || "",
   IB_AUTH_TIMEOUT: parseInt(process.env.IB_AUTH_TIMEOUT || "300000"),
+  IB_AUTH_WAIT_SECONDS: parseInt(process.env.IB_AUTH_WAIT_SECONDS || "60"),
+  IB_AUTH_POLL_SECONDS: parseInt(process.env.IB_AUTH_POLL_SECONDS || "5"),
   IB_HEADLESS_MODE: process.env.IB_HEADLESS_MODE === "true",
 
   // Paper trading configuration

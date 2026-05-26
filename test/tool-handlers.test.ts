@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolHandlers, ToolHandlerContext } from '../src/tool-handlers.js';
 import { IBClient } from '../src/ib-client.js';
 import { IBGatewayManager } from '../src/gateway-manager.js';
+import { HeadlessAuthenticator } from '../src/headless-auth.js';
 import open from 'open';
 
 // Mock dependencies
@@ -19,6 +20,10 @@ describe('ToolHandlers', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
+      authenticate: vi.fn().mockReturnValue(new Promise(() => {})),
+      close: vi.fn().mockResolvedValue(undefined),
+    }) as any);
 
     // Create mock IBClient
     mockIBClient = {
@@ -332,27 +337,82 @@ describe('ToolHandlers', () => {
   });
 
   describe('Headless Mode Authentication', () => {
-    it('should trigger auth in headless mode and return a pending response', async () => {
+    it('should leave the already-authenticated path unchanged in headless mode', async () => {
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
-      
-      mockIBClient.checkAuthenticationStatus = vi.fn()
-        .mockResolvedValueOnce(false); // Initial check: not authenticated
+      const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
+      mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(true);
+      mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
 
       handlers = new ToolHandlers(context);
 
       const result = await handlers.getAccountInfo({ confirm: true });
 
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.accounts).toEqual(mockAccounts);
+      expect(mockIBClient.getAccountInfo).toHaveBeenCalled();
+      expect(HeadlessAuthenticator).not.toHaveBeenCalled();
+    });
+
+    it('should continue the original tool call when auth succeeds within the default wait', async () => {
+      vi.useFakeTimers();
+
+      context.config.IB_HEADLESS_MODE = true;
+      context.config.IB_USERNAME = 'testuser';
+      context.config.IB_PASSWORD_AUTH = 'testpass';
+      const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
+      mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockResolvedValue(false);
+      vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
+        authenticate: vi.fn().mockReturnValue(new Promise((resolve) => {
+          setTimeout(() => resolve({ success: true, status: 'SUCCESS' }), 5_000);
+        })),
+        close: vi.fn().mockResolvedValue(undefined),
+      }) as any);
+
+      handlers = new ToolHandlers(context);
+
+      const resultPromise = handlers.getAccountInfo({ confirm: true });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await resultPromise;
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.accounts).toEqual(mockAccounts);
+      expect(mockIBClient.getAccountInfo).toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it('should wait the default auth window before returning concise pending metadata', async () => {
+      vi.useFakeTimers();
+
+      context.config.IB_HEADLESS_MODE = true;
+      context.config.IB_USERNAME = 'testuser';
+      context.config.IB_PASSWORD_AUTH = 'testpass';
+      mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(false);
+
+      handlers = new ToolHandlers(context);
+
+      const resultPromise = handlers.getAccountInfo({ confirm: true });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await resultPromise;
+
       expect(result.content).toBeDefined();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.status).toBe('AUTHENTICATION_STARTED');
-      expect(payload.requiresAction).toBe(true);
+      expect(payload.status).toBe('AUTHENTICATION_PENDING');
+      expect(payload.pendingAction).toBe(true);
+      expect(payload.requiresUserAction).toBe(true);
+      expect(payload.checkAgainSeconds).toBe(10);
+      expect(payload.maxWaitSeconds).toBe(60);
+      expect(payload.waitedSeconds).toBe(60);
       expect(payload.url).toContain('5000');
-      expect(payload.authStarted).toBe(true);
-      expect(payload.twoFactorPending).toBe(false);
-      expect(payload.notificationVerified).toBe(false);
-      expect(payload.message).not.toContain('push notification');
+      expect(payload.userAction).toContain('Approve');
+      expect(payload.nextInstruction).toBe('Wait 10 seconds, then check account info again.');
+      expect(payload.message).toBe('IBKR authentication is still pending.');
+      expect(JSON.stringify(payload).toLowerCase()).not.toContain('retry');
+      expect(mockIBClient.getAccountInfo).not.toHaveBeenCalled();
+      vi.useRealTimers();
     });
   });
 
