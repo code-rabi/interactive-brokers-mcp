@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'child_process';
 import { promises as fs, existsSync as fsExistsSync } from 'fs';
+import type { FileHandle } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -17,10 +18,26 @@ const MUSL_RUNTIME_DOWNLOADS: Record<string, string> = {
   'linux-arm64-musl': 'https://download.bell-sw.com/java/11.0.31+11/bellsoft-jre11.0.31+11-linux-aarch64-musl.tar.gz',
 };
 
+type GatewaySessionMetadata = {
+  managedBy: 'interactive-brokers-mcp';
+  version: string;
+  pid: number;
+  port: number;
+  startedAt: string;
+  gatewayDir: string;
+  stdoutLog: string;
+  stderrLog: string;
+};
+
 export class IBGatewayManager {
   private gatewayProcess: ChildProcess | null = null;
   private gatewayDir: string;
   private jreDir: string;
+  private runtimeDir: string;
+  private metadataPath: string;
+  private lockPath: string;
+  private stdoutLogPath: string;
+  private stderrLogPath: string;
   private isStarting = false;
   private isReady = false;
   private useStderr: boolean;
@@ -41,6 +58,11 @@ export class IBGatewayManager {
   constructor() {
     this.gatewayDir = path.join(__dirname, '../ib-gateway');
     this.jreDir = path.join(__dirname, '../runtime');
+    this.runtimeDir = path.join(this.gatewayDir, '.runtime');
+    this.metadataPath = path.join(this.runtimeDir, 'gateway-session.json');
+    this.lockPath = path.join(this.runtimeDir, 'gateway-session.lock');
+    this.stdoutLogPath = path.join(this.runtimeDir, 'gateway.stdout.log');
+    this.stderrLogPath = path.join(this.runtimeDir, 'gateway.stderr.log');
     this.useStderr = !(process.env.MCP_HTTP_SERVER === 'true' || process.argv.includes('--http'));
     this.forceStandaloneGateway = process.env.IB_FORCE_STANDALONE_GATEWAY === 'true';
     this.registerCleanupHandlers();
@@ -80,8 +102,8 @@ export class IBGatewayManager {
 
   private async findExistingGateway(): Promise<number | null> {
     if (this.forceStandaloneGateway) {
-      this.log('Standalone gateway mode enabled; skipping existing gateway discovery');
-      return null;
+      this.log('Standalone gateway mode enabled; checking only MCP-managed Gateway session');
+      return this.findManagedGateway();
     }
     this.log('🔍 Checking for existing Gateway instances...');
 
@@ -109,8 +131,8 @@ export class IBGatewayManager {
 
   async quickCheckExistingGateway(): Promise<number | null> {
     if (this.forceStandaloneGateway) {
-      this.log('Standalone gateway mode enabled; skipping quick existing gateway discovery');
-      return null;
+      this.log('Standalone gateway mode enabled; checking only MCP-managed Gateway session');
+      return this.findManagedGateway();
     }
     this.log('⚡ Quick check for existing Gateway instances...');
     try {
@@ -346,6 +368,153 @@ export class IBGatewayManager {
     }
   }
 
+  private async ensureRuntimeDir(): Promise<void> {
+    await fs.mkdir(this.runtimeDir, { recursive: true });
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return false;
+    }
+
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return code === 'EPERM';
+    }
+  }
+
+  private async readManagedSessionMetadata(): Promise<GatewaySessionMetadata | null> {
+    try {
+      const rawMetadata = await fs.readFile(this.metadataPath, 'utf8');
+      const metadata = JSON.parse(rawMetadata) as Partial<GatewaySessionMetadata>;
+      if (
+        metadata.managedBy !== 'interactive-brokers-mcp' ||
+        !Number.isInteger(metadata.pid) ||
+        !Number.isInteger(metadata.port)
+      ) {
+        return null;
+      }
+
+      return metadata as GatewaySessionMetadata;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.log(`Ignoring unreadable managed Gateway metadata: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return null;
+    }
+  }
+
+  private async writeManagedSessionMetadata(pid: number, port: number): Promise<void> {
+    await this.ensureRuntimeDir();
+    const metadata: GatewaySessionMetadata = {
+      managedBy: 'interactive-brokers-mcp',
+      version: packageJson.version,
+      pid,
+      port,
+      startedAt: new Date().toISOString(),
+      gatewayDir: this.gatewayDir,
+      stdoutLog: this.stdoutLogPath,
+      stderrLog: this.stderrLogPath,
+    };
+
+    await fs.writeFile(this.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+  }
+
+  private async clearManagedSessionMetadata(): Promise<void> {
+    await fs.rm(this.metadataPath, { force: true }).catch(() => undefined);
+  }
+
+  private async findManagedGateway(): Promise<number | null> {
+    const metadata = await this.readManagedSessionMetadata();
+    if (!metadata) {
+      return null;
+    }
+
+    if (!this.isProcessAlive(metadata.pid)) {
+      this.log(`Removing stale managed Gateway metadata for pid ${metadata.pid}`);
+      await this.clearManagedSessionMetadata();
+      return null;
+    }
+
+    const isReachable = await this.checkGatewayHealth(metadata.port);
+    if (!isReachable) {
+      this.log(`Managed Gateway pid ${metadata.pid} exists but port ${metadata.port} is not reachable yet`);
+      return null;
+    }
+
+    this.log(`✅ Found MCP-managed Gateway pid ${metadata.pid} on port ${metadata.port}`);
+    return metadata.port;
+  }
+
+  private async acquireManagedGatewayLock(): Promise<FileHandle> {
+    await this.ensureRuntimeDir();
+
+    try {
+      const handle = await fs.open(this.lockPath, 'wx');
+      await handle.writeFile(JSON.stringify({
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+      }));
+      return handle;
+    } catch (error) {
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (errno !== 'EEXIST') {
+        throw error;
+      }
+
+      const lockOwnerPid = await this.readLockOwnerPid();
+      if (lockOwnerPid && this.isProcessAlive(lockOwnerPid)) {
+        throw new Error(`Another MCP process is starting the managed Gateway (lock held by pid ${lockOwnerPid})`);
+      }
+
+      this.log('Removing stale managed Gateway startup lock');
+      await fs.rm(this.lockPath, { force: true });
+      const handle = await fs.open(this.lockPath, 'wx');
+      await handle.writeFile(JSON.stringify({
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+      }));
+      return handle;
+    }
+  }
+
+  private async readLockOwnerPid(): Promise<number | null> {
+    try {
+      const rawLock = await fs.readFile(this.lockPath, 'utf8');
+      const lock = JSON.parse(rawLock) as { pid?: unknown };
+      return typeof lock.pid === 'number' && Number.isInteger(lock.pid) ? lock.pid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async releaseManagedGatewayLock(handle: FileHandle | null): Promise<void> {
+    if (!handle) {
+      return;
+    }
+
+    await handle.close().catch(() => undefined);
+    await fs.rm(this.lockPath, { force: true }).catch(() => undefined);
+  }
+
+  private async waitForManagedGatewayFromMetadata(): Promise<boolean> {
+    const maxAttempts = 30;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const managedPort = await this.findManagedGateway();
+      if (managedPort) {
+        this.currentPort = managedPort;
+        this.isReady = true;
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    return false;
+  }
+
   // Public method for fast initialization (used during server startup)
   async quickStartGateway(): Promise<void> {
     this.log('⚡ Quick Gateway initialization...');
@@ -385,7 +554,7 @@ export class IBGatewayManager {
     })();
     
     // Add unhandled rejection handler to prevent process termination
-    this.backgroundStartupPromise.catch((error) => {
+    this.backgroundStartupPromise.catch(() => {
       // Error already logged above, just prevent unhandled rejection
     });
   }
@@ -437,10 +606,35 @@ export class IBGatewayManager {
       return;
     }
 
+    let lockHandle: FileHandle | null = null;
     this.isStarting = true;
     this.spawnFailure = null;
 
     try {
+      const managedPort = await this.findManagedGateway();
+      if (managedPort) {
+        this.currentPort = managedPort;
+        this.isReady = true;
+        return;
+      }
+
+      try {
+        lockHandle = await this.acquireManagedGatewayLock();
+      } catch (error) {
+        this.log(`Managed Gateway startup lock is held: ${error instanceof Error ? error.message : String(error)}`);
+        if (await this.waitForManagedGatewayFromMetadata()) {
+          return;
+        }
+        throw error;
+      }
+
+      const managedPortAfterLock = await this.findManagedGateway();
+      if (managedPortAfterLock) {
+        this.currentPort = managedPortAfterLock;
+        this.isReady = true;
+        return;
+      }
+
       await this.ensureGatewayExists();
       
       // Check port availability for new Gateway
@@ -460,7 +654,7 @@ export class IBGatewayManager {
           await ConfigUtils.createTempConfigWithPort(this.gatewayDir, this.currentPort);
           this.log(`📝 Created temporary config file with port ${this.currentPort}`);
         } catch (error) {
-          this.log(`❌ No alternative ports available, will try with default port anyway`);
+          this.log('❌ No alternative ports available, will try with default port anyway');
           this.currentPort = defaultPort;
         }
       }
@@ -480,11 +674,17 @@ export class IBGatewayManager {
       this.log('🚀 Starting IB Gateway with bundled JRE...');
       this.log('   Java: ' + bundledJavaPath);
       this.log('   Java Home: ' + bundledJavaHome);
-      this.log('   Lib Path: ' + `${bundledJavaServerLibPath}:${bundledJavaLibPath}`);
+      this.log(`   Lib Path: ${bundledJavaServerLibPath}:${bundledJavaLibPath}`);
       this.log('   Config: ' + configFile);
       this.log('   Port: ' + this.currentPort);
       
-      this.gatewayProcess = spawn(bundledJavaPath, [
+      await this.ensureRuntimeDir();
+      const stdoutHandle = await fs.open(this.stdoutLogPath, 'a');
+      const stderrHandle = await fs.open(this.stderrLogPath, 'a');
+      await stdoutHandle.write(`\n[${new Date().toISOString()}] Starting IB Gateway on port ${this.currentPort}\n`);
+      await stderrHandle.write(`\n[${new Date().toISOString()}] Starting IB Gateway on port ${this.currentPort}\n`);
+
+      const gatewayProcess = spawn(bundledJavaPath, [
         '-server',
         '-Djava.awt.headless=true',
         '-Xmx512m',
@@ -505,37 +705,15 @@ export class IBGatewayManager {
           JAVA_HOME: bundledJavaHome,
           LD_LIBRARY_PATH: `${bundledJavaServerLibPath}:${bundledJavaLibPath}:${process.env.LD_LIBRARY_PATH || ''}`
         },
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', stdoutHandle.fd, stderrHandle.fd]
       });
 
-      this.gatewayProcess.unref();
+      this.gatewayProcess = gatewayProcess;
+      gatewayProcess.unref();
+      await stdoutHandle.close();
+      await stderrHandle.close();
 
-      // Buffer the tail of stderr so we can include it in a failure reason if the process
-      // dies before the gateway's HTTP port comes up.
-      let stderrTail = '';
-
-      this.gatewayProcess.stdout?.on('data', (data) => {
-        const output = data.toString().trim();
-        if (output) {
-          this.log(`[Gateway] ${output}`);
-          // Check for startup completion indicators
-          if (output.includes('Server ready') || output.includes('started on port')) {
-            this.isReady = true;
-            this.log('✅ IB Gateway is ready!');
-          }
-        }
-      });
-
-      this.gatewayProcess.stderr?.on('data', (data) => {
-        const chunk = data.toString();
-        stderrTail = (stderrTail + chunk).slice(-IBGatewayManager.STDERR_TAIL_BYTES);
-        const trimmed = chunk.trim();
-        if (trimmed && !trimmed.includes('WARNING')) {
-          Logger.error(`[Gateway Error] ${trimmed}`);
-        }
-      });
-
-      this.gatewayProcess.on('error', (error) => {
+      gatewayProcess.once('error', (error) => {
         Logger.error('❌ Gateway process error:', error.message);
         this.spawnFailure = {
           reason: this.diagnoseSpawnError(error, bundledJavaPath),
@@ -545,24 +723,9 @@ export class IBGatewayManager {
         this.isReady = false;
       });
 
-      this.gatewayProcess.on('exit', (code, signal) => {
-        this.log(`🛑 Gateway process exited with code ${code}, signal ${signal}`);
-        // Any exit before the gateway became ready is a failure: a clean exit-0 means the JVM
-        // terminated without ever opening the HTTP port (e.g. config error), and code===null
-        // means the process was killed by a signal (e.g. OOM). Recording spawnFailure for all
-        // of these makes waitForGateway() bail out fast instead of polling for 30s.
-        if (!this.isReady && !this.spawnFailure) {
-          const exitDescriptor =
-            code !== null ? `code ${code}` : `signal ${signal ?? 'unknown'}`;
-          this.spawnFailure = {
-            reason: `IB Gateway process exited (${exitDescriptor}) before becoming ready`,
-            details: stderrTail.trim() || `(no stderr captured)`,
-          };
-        }
-        this.gatewayProcess = null;
-        this.isStarting = false;
-        this.isReady = false;
-      });
+      if (gatewayProcess.pid) {
+        await this.writeManagedSessionMetadata(gatewayProcess.pid, this.currentPort);
+      }
 
       // Wait for the gateway to be ready
       this.log('⏳ Waiting for IB Gateway to start...');
@@ -576,6 +739,8 @@ export class IBGatewayManager {
       this.isStarting = false;
       this.isReady = false;
       throw error;
+    } finally {
+      await this.releaseManagedGatewayLock(lockHandle);
     }
   }
 
@@ -596,7 +761,7 @@ export class IBGatewayManager {
           this.log(`✅ IB Gateway is responding on port ${this.currentPort}`);
           return;
         }
-      } catch (error) {
+      } catch {
         // Gateway not ready yet, continue waiting
       }
 
@@ -611,7 +776,7 @@ export class IBGatewayManager {
     if (this.spawnFailure) {
       throw this.buildSpawnFailureError();
     }
-    throw new Error('IB Gateway failed to start within 30 seconds');
+    throw new Error(`IB Gateway failed to start within 30 seconds. See logs at ${this.stdoutLogPath} and ${this.stderrLogPath}`);
   }
 
   private buildSpawnFailureError(): Error {

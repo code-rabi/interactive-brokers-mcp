@@ -189,6 +189,20 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Flex Token | `IB_FLEX_TOKEN` | N/A |
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |
 
+## Gateway Lifecycle
+
+On startup, the MCP first probes reachable local Gateway endpoints on the configured port and common Client Portal Gateway ports. If a healthy existing Gateway is found, the MCP attaches to it and does not start another bundled Gateway.
+
+When no suitable existing Gateway is reachable, the MCP starts the bundled Java Gateway as a durable detached process. Runtime coordination files are stored under `ib-gateway/.runtime/`:
+
+- `gateway-session.json` records the MCP-managed Gateway pid, port, version, and log paths.
+- `gateway-session.lock` prevents two MCP processes from starting duplicate managed Gateways at the same time.
+- `gateway.stdout.log` and `gateway.stderr.log` receive the Gateway process output.
+
+Normal MCP shutdown detaches from the Gateway and leaves it running so later MCP runs can reuse it. If `IB_FORCE_STANDALONE_GATEWAY=true` is set, the MCP skips unrelated external Gateway discovery, but it still reuses or coordinates through the durable MCP-managed session metadata and lock files.
+
+To reset the managed Gateway session, stop the Gateway process recorded in `ib-gateway/.runtime/gateway-session.json`, then remove `ib-gateway/.runtime/gateway-session.json` and any stale `ib-gateway/.runtime/gateway-session.lock`. The MCP automatically removes stale metadata when the recorded pid no longer exists.
+
 ## Available MCP Tools
 
 ### Trading & Account Management
@@ -222,6 +236,8 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 
 - If another IB Gateway is already listening on a local port but should not be reused, set `IB_FORCE_STANDALONE_GATEWAY=true`
 - Existing gateways are only reused when the MCP process can reach them over HTTPS; otherwise the bundled standalone gateway is started on an available port
+- For MCP-managed Gateway startup issues, inspect `ib-gateway/.runtime/gateway.stdout.log`, `ib-gateway/.runtime/gateway.stderr.log`, and `ib-gateway/.runtime/gateway-session.json`
+- To clear a stale managed startup lock, confirm no MCP process is currently starting Gateway, then remove `ib-gateway/.runtime/gateway-session.lock`
 
 ## Support
 

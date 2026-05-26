@@ -6,6 +6,7 @@
 
 # But still ignore logs and temporary files
 logs/
+.runtime/
 *.log
 *.tmp
 *.temp
