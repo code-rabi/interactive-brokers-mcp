@@ -149,6 +149,7 @@ export class ToolHandlers {
     authPromise: Promise<HeadlessAuthOutcome>,
     maxWaitSeconds: number,
     pollSeconds: number,
+    authenticator: HeadlessAuthenticator,
   ): Promise<{ authenticated: boolean; outcome?: HeadlessAuthOutcome; waitedSeconds: number }> {
     const startedAt = Date.now();
     const deadline = startedAt + maxWaitSeconds * 1000;
@@ -176,12 +177,20 @@ export class ToolHandlers {
       }
     };
 
+    const getWaitedSeconds = (): number => {
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      return Math.min(elapsed, maxWaitSeconds);
+    };
+
     while (Date.now() < deadline) {
       if (outcome?.success || await checkAuthenticated()) {
+        if (!outcome?.browserKeptOpen) {
+          await authenticator.close().catch(() => {});
+        }
         return {
           authenticated: true,
           outcome,
-          waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+          waitedSeconds: getWaitedSeconds(),
         };
       }
 
@@ -189,7 +198,7 @@ export class ToolHandlers {
         return {
           authenticated: false,
           outcome,
-          waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+          waitedSeconds: getWaitedSeconds(),
         };
       }
 
@@ -198,17 +207,20 @@ export class ToolHandlers {
     }
 
     if (outcome?.success || await checkAuthenticated()) {
+      if (!outcome?.browserKeptOpen) {
+        await authenticator.close().catch(() => {});
+      }
       return {
         authenticated: true,
         outcome,
-        waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        waitedSeconds: getWaitedSeconds(),
       };
     }
 
     return {
       authenticated: false,
       outcome,
-      waitedSeconds: Math.round((Date.now() - startedAt) / 1000),
+      waitedSeconds: getWaitedSeconds(),
     };
   }
 
@@ -269,7 +281,7 @@ export class ToolHandlers {
       }
 
       const { maxWaitSeconds, pollSeconds } = this.getAuthWaitOptions();
-      const waitResult = await this.waitForHeadlessAuthentication(p, maxWaitSeconds, pollSeconds);
+      const waitResult = await this.waitForHeadlessAuthentication(p, maxWaitSeconds, pollSeconds, authenticator);
 
       if (waitResult.authenticated) {
         return { ok: true };
