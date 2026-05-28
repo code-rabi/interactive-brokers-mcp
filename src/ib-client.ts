@@ -1,3 +1,7 @@
+import { spawn } from "child_process";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import axios, { AxiosInstance, AxiosRequestConfig } from "axios";
 import https from "https";
 import { Logger } from "./logger.js";
@@ -266,6 +270,92 @@ export class IBClient {
     this.tickleInterval = setInterval(() => {
       this.tickle();
     }, this.tickleIntervalMs);
+
+    // Spawn Durable Persistent Session Tickler
+    try {
+      this.spawnDurableTickler();
+    } catch (error) {
+      Logger.error("[TICKLE] Failed to spawn durable background tickler:", error);
+    }
+  }
+
+  /**
+   * Spawns a background detached node process running tickler.js to maintain the session
+   */
+  private spawnDurableTickler(): void {
+    const runtimeDir = path.resolve("ib-gateway/.runtime");
+    const ticklerJsonPath = path.join(runtimeDir, "tickler-session.json");
+
+    // Ensure directory exists
+    if (!fs.existsSync(runtimeDir)) {
+      fs.mkdirSync(runtimeDir, { recursive: true });
+    }
+
+    // Prevent duplicates: Check if we have an existing tickler running
+    if (fs.existsSync(ticklerJsonPath)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(ticklerJsonPath, "utf8"));
+        if (data && typeof data.pid === "number") {
+          try {
+            // Check if process is alive
+            process.kill(data.pid, 0);
+            Logger.log(`[TICKLE] Durable tickler already running with PID ${data.pid}`);
+            return;
+          } catch (e) {
+            // Process not alive, delete stale file or proceed
+            Logger.log(`[TICKLE] Stale durable tickler file found (PID ${data.pid} not running). Spawning new one.`);
+            fs.unlinkSync(ticklerJsonPath);
+          }
+        }
+      } catch (err) {
+        Logger.warn("[TICKLE] Failed to read or parse tickler-session.json, will overwrite:", err);
+      }
+    }
+
+    // Resolve path to compiled tickler script
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const scriptPath = path.resolve(__dirname, "scripts/tickler.js");
+
+    if (!fs.existsSync(scriptPath)) {
+      Logger.error(`[TICKLE] Tickler script not found at ${scriptPath}`);
+      return;
+    }
+
+    Logger.log(`[TICKLE] Spawning detached durable tickler background process for port ${this.config.port}...`);
+    
+    // Spawn detached process
+    const child = spawn(
+      process.execPath,
+      [
+        scriptPath,
+        this.config.host,
+        String(this.config.port),
+        this.sessionCookieHeader || ""
+      ],
+      {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env }
+      }
+    );
+
+    child.unref();
+
+    if (child.pid) {
+      Logger.log(`[TICKLE] Spawned durable tickler background process successfully (PID: ${child.pid})`);
+      fs.writeFileSync(
+        ticklerJsonPath,
+        JSON.stringify({
+          pid: child.pid,
+          host: this.config.host,
+          port: this.config.port,
+          spawnedAt: new Date().toISOString()
+        }, null, 2),
+        "utf8"
+      );
+    } else {
+      Logger.error("[TICKLE] Detached tickler spawned but pid is missing.");
+    }
   }
 
   /**
