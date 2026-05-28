@@ -356,8 +356,6 @@ describe('ToolHandlers', () => {
     });
 
     it('should continue the original tool call when auth succeeds within the default wait', async () => {
-      vi.useFakeTimers();
-
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
@@ -366,37 +364,37 @@ describe('ToolHandlers', () => {
       mockIBClient.checkAuthenticationStatus = vi.fn()
         .mockResolvedValue(false);
       vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
-        authenticate: vi.fn().mockReturnValue(new Promise((resolve) => {
-          setTimeout(() => resolve({ success: true, status: 'SUCCESS' }), 5_000);
-        })),
+        authenticate: vi.fn().mockResolvedValue({ success: true, status: 'SUCCESS' }),
         close: vi.fn().mockResolvedValue(undefined),
       }) as any);
 
       handlers = new ToolHandlers(context);
 
-      const resultPromise = handlers.getAccountInfo({ confirm: true });
-      await vi.advanceTimersByTimeAsync(5_000);
-      const result = await resultPromise;
+      const result = await handlers.getAccountInfo({ confirm: true });
 
       const payload = JSON.parse(result.content[0].text);
       expect(payload.accounts).toEqual(mockAccounts);
       expect(mockIBClient.getAccountInfo).toHaveBeenCalled();
-      vi.useRealTimers();
     });
 
-    it('should wait the default auth window before returning concise pending metadata', async () => {
-      vi.useFakeTimers();
-
+    it('should wait up to the timeout before returning concise pending metadata if auth is waiting for 2FA', async () => {
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
+      context.config.IB_AUTH_TIMEOUT = 10000; // 10 seconds for test
       mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(false);
+      vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
+        authenticate: vi.fn().mockResolvedValue({
+          success: false,
+          status: 'WAITING_FOR_USER_2FA',
+          message: 'IBKR reports that it sent a mobile notification and is waiting for approval'
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+      }) as any);
 
       handlers = new ToolHandlers(context);
 
-      const resultPromise = handlers.getAccountInfo({ confirm: true });
-      await vi.advanceTimersByTimeAsync(60_000);
-      const result = await resultPromise;
+      const result = await handlers.getAccountInfo({ confirm: true });
 
       expect(result.content).toBeDefined();
       const payload = JSON.parse(result.content[0].text);
@@ -404,15 +402,14 @@ describe('ToolHandlers', () => {
       expect(payload.pendingAction).toBe(true);
       expect(payload.requiresUserAction).toBe(true);
       expect(payload.checkAgainSeconds).toBe(10);
-      expect(payload.maxWaitSeconds).toBe(60);
-      expect(payload.waitedSeconds).toBe(60);
+      expect(payload.maxWaitSeconds).toBe(10);
+      expect(payload.waitedSeconds).toBe(10);
       expect(payload.url).toContain('5000');
       expect(payload.userAction).toContain('Approve');
       expect(payload.nextInstruction).toBe('Wait 10 seconds, then check account info again.');
-      expect(payload.message).toBe('IBKR authentication is still pending.');
+      expect(payload.message).toBe('IBKR reports that it sent a mobile notification and is waiting for approval');
       expect(JSON.stringify(payload).toLowerCase()).not.toContain('retry');
       expect(mockIBClient.getAccountInfo).not.toHaveBeenCalled();
-      vi.useRealTimers();
     });
   });
 
