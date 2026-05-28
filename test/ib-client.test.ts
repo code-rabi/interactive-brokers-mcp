@@ -1,10 +1,27 @@
 // test/ib-client.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { IBClient, SymbolNotFoundError } from '../src/ib-client.js';
 import axios from 'axios';
+import { IBClient, SymbolNotFoundError } from '../src/ib-client.js';
+
+const { mockSpawn, mockFs } = vi.hoisted(() => ({
+  mockSpawn: vi.fn(),
+  mockFs: {
+    existsSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    readFileSync: vi.fn(),
+    unlinkSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  },
+}));
 
 // Mock axios
 vi.mock('axios');
+vi.mock('child_process', () => ({
+  spawn: mockSpawn,
+}));
+vi.mock('fs', () => ({
+  default: mockFs,
+}));
 
 describe('IBClient', () => {
   let client: IBClient;
@@ -15,11 +32,23 @@ describe('IBClient', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFs.existsSync.mockImplementation((target: unknown) =>
+      String(target).endsWith('scripts/tickler.js')
+    );
+    mockSpawn.mockReturnValue({
+      pid: 12345,
+      unref: vi.fn(),
+    });
     
     // Mock axios.create to return a mock instance
     const mockAxiosInstance = {
       get: vi.fn(),
       post: vi.fn(),
+      defaults: {
+        headers: {
+          common: {},
+        },
+      },
       interceptors: {
         request: { use: vi.fn() },
         response: { use: vi.fn() },
@@ -99,6 +128,91 @@ describe('IBClient', () => {
       const result = await client.checkAuthenticationStatus();
       
       expect(result).toBe(false);
+    });
+
+    it('should spawn the durable tickler with package-anchored paths and env cookies', () => {
+      client.setSessionCookies([{ name: 'SBID', value: 'abc', domain: 'localhost' }]);
+
+      (client as any).spawnDurableTickler();
+
+      expect(mockFs.mkdirSync).toHaveBeenCalledWith(
+        expect.stringContaining('ib-gateway/.runtime'),
+        { recursive: true }
+      );
+      expect(mockSpawn).toHaveBeenCalledWith(
+        process.execPath,
+        [
+          expect.stringContaining('scripts/tickler.js'),
+          'localhost',
+          '5000',
+        ],
+        expect.objectContaining({
+          detached: true,
+          stdio: 'ignore',
+          env: expect.objectContaining({
+            IB_TICKLER_COOKIE_HEADER: 'SBID=abc',
+          }),
+        })
+      );
+
+      const [, metadataJson] = mockFs.writeFileSync.mock.calls[0];
+      expect(JSON.parse(metadataJson)).toMatchObject({
+        pid: 12345,
+        host: 'localhost',
+        port: 5000,
+      });
+    });
+
+    it('should replace a durable tickler when the stored target port no longer matches', () => {
+      mockFs.existsSync.mockImplementation((target: unknown) => {
+        const value = String(target);
+        return value.endsWith('tickler-session.json') || value.endsWith('scripts/tickler.js') || value.endsWith('.runtime');
+      });
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({
+        pid: 321,
+        host: 'localhost',
+        port: 5001,
+      }));
+
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+        if (signal === 0 || signal === 'SIGTERM') {
+          return true;
+        }
+        return true;
+      }) as typeof process.kill);
+
+      (client as any).spawnDurableTickler();
+
+      expect(killSpy).toHaveBeenNthCalledWith(1, 321, 0);
+      expect(killSpy).toHaveBeenNthCalledWith(2, 321, 'SIGTERM');
+      expect(mockFs.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('tickler-session.json'));
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+      killSpy.mockRestore();
+    });
+
+    it('should treat EPERM pid probes as an already-running matching tickler', () => {
+      mockFs.existsSync.mockImplementation((target: unknown) => {
+        const value = String(target);
+        return value.endsWith('tickler-session.json') || value.endsWith('scripts/tickler.js') || value.endsWith('.runtime');
+      });
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({
+        pid: 321,
+        host: 'localhost',
+        port: 5000,
+      }));
+
+      const error = Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation((() => {
+        throw error;
+      }) as typeof process.kill);
+
+      (client as any).spawnDurableTickler();
+
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockFs.unlinkSync).not.toHaveBeenCalled();
+
+      killSpy.mockRestore();
     });
   });
 

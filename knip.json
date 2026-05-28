@@ -1,6 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "ignore": ["ib-gateway/**"],
+  "entry": [
+    "src/scripts/tickler.ts",
+    "test/**/*.test.ts"
+  ],
+  "ignore": ["ib-gateway/**", "dist/**"],
   "ignoreDependencies": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/github",

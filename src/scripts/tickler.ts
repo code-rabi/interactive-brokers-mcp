@@ -5,7 +5,7 @@ import https from "https";
 const args = process.argv.slice(2);
 const host = args[0] || "127.0.0.1";
 const port = Number(args[1]) || 5000;
-const sessionCookieHeader = args[2] || "";
+const sessionCookieHeader = process.env.IB_TICKLER_COOKIE_HEADER || "";
 
 const baseUrl = `https://${host}:${port}/v1/api`;
 
@@ -63,7 +63,7 @@ async function checkAndTickle(): Promise<boolean> {
       console.log(`[TICKLER] HTTP 401 Unauthorized encountered. Self-terminating.`);
       return false;
     }
-    // For other transient network errors, we can retry (up to some point, but let's terminate if unreachable)
+    // For network errors or an unreachable gateway, self-terminate and let the main process recreate us after re-authentication.
     console.log(`[TICKLER] Gateway unreachable or network error. Self-terminating.`);
     return false;
   }
