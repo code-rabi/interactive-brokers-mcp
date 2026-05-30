@@ -1,5 +1,5 @@
 // test/tool-handlers.test.ts
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ToolHandlers, ToolHandlerContext } from '../src/tool-handlers.js';
 import { IBClient } from '../src/ib-client.js';
 import { IBGatewayManager } from '../src/gateway-manager.js';
@@ -21,7 +21,7 @@ describe('ToolHandlers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
-      authenticate: vi.fn().mockResolvedValue({ success: true }),
+      authenticate: vi.fn().mockReturnValue(new Promise(() => {})),
       close: vi.fn().mockResolvedValue(undefined),
     }) as any);
 
@@ -60,17 +60,11 @@ describe('ToolHandlers', () => {
         IB_HEADLESS_MODE: false,
         IB_GATEWAY_HOST: 'localhost',
         IB_GATEWAY_PORT: 5000,
-        IB_AUTH_TIMEOUT: 10, // Use a short timeout for testing
       },
     };
 
     handlers = new ToolHandlers(context);
   });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
 
   describe('getAccountInfo', () => {
     it('should return account information', async () => {
@@ -343,17 +337,15 @@ describe('ToolHandlers', () => {
   });
 
   describe('Headless Mode Authentication', () => {
-    beforeEach(() => {
+    it('should leave the already-authenticated path unchanged in headless mode', async () => {
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
-      handlers = new ToolHandlers(context);
-    });
-
-    it('should return account info directly if already authenticated', async () => {
-      const mockAccounts = [{ id: 'U12345' }];
+      const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
       mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(true);
       mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
+
+      handlers = new ToolHandlers(context);
 
       const result = await handlers.getAccountInfo({ confirm: true });
 
@@ -363,59 +355,28 @@ describe('ToolHandlers', () => {
       expect(HeadlessAuthenticator).not.toHaveBeenCalled();
     });
 
-    it('should block, authenticate, and then return account info', async () => {
-      vi.useFakeTimers();
-      const mockAccounts = [{ id: 'U12345' }];
-      mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
+    it('should trigger background auth and return started metadata immediately', async () => {
+      context.config.IB_HEADLESS_MODE = true;
+      context.config.IB_USERNAME = 'testuser';
+      context.config.IB_PASSWORD_AUTH = 'testpass';
+      mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(false);
 
-      // Simulate being unauthenticated initially, then authenticated after a delay
-      vi.mocked(mockIBClient.checkAuthenticationStatus)
-        .mockResolvedValueOnce(false) // First call in ensureAuth
-        .mockResolvedValueOnce(false) // First poll
-        .mockResolvedValueOnce(true);  // Second poll succeeds
+      handlers = new ToolHandlers(context);
 
-      const getAccountInfoPromise = handlers.getAccountInfo({ confirm: true });
+      const result = await handlers.getAccountInfo({ confirm: true });
 
-      // Let the event loop run to start the async operations
-      await vi.advanceTimersByTimeAsync(1);
-      
-      expect(HeadlessAuthenticator).toHaveBeenCalled();
-      
-      // Advance time to simulate polling
-      await vi.advanceTimersByTimeAsync(5000);
-      
-      // Advance time again for the successful poll
-      await vi.advanceTimersByTimeAsync(5000);
-
-      const result = await getAccountInfoPromise;
+      expect(result.content).toBeDefined();
       const payload = JSON.parse(result.content[0].text);
-
-      expect(payload.accounts).toEqual(mockAccounts);
-      expect(mockIBClient.getAccountInfo).toHaveBeenCalled();
-      expect(vi.mocked(mockIBClient.checkAuthenticationStatus)).toHaveBeenCalledTimes(3);
-    });
-    
-    it('should throw a timeout error if authentication does not succeed', async () => {
-      vi.useFakeTimers();
-      
-      // Always return unauthenticated
-      vi.mocked(mockIBClient.checkAuthenticationStatus).mockResolvedValue(false);
-      
-      const getAccountInfoPromise = handlers.getAccountInfo({ confirm: true });
-
-      // Prevent unhandled rejection warning by attaching a catch handler
-      getAccountInfoPromise.catch(() => {});
-      
-      // Let the event loop run to start the async operations
-      await vi.advanceTimersByTimeAsync(1);
-      
-      expect(HeadlessAuthenticator).toHaveBeenCalledTimes(1);
-      
-      // Advance timers past the timeout
-      await vi.advanceTimersByTimeAsync(11 * 1000);
-      
-      await expect(getAccountInfoPromise).rejects.toThrow(/Authentication timed out/);
+      expect(payload.status).toBe('AUTHENTICATION_STARTED');
+      expect(payload.pendingAction).toBe(true);
+      expect(payload.requiresUserAction).toBe(true);
+      expect(payload.checkAgainSeconds).toBe(10);
+      expect(payload.url).toContain('5000');
+      expect(payload.userAction).toContain('Approve');
+      expect(payload.nextInstruction).toBe('Wait 10 seconds, then check account info again.');
+      expect(payload.message).toBe('Headless authentication has been started in the background.');
       expect(mockIBClient.getAccountInfo).not.toHaveBeenCalled();
+      expect(HeadlessAuthenticator).toHaveBeenCalled();
     });
   });
 
@@ -443,6 +404,42 @@ describe('ToolHandlers', () => {
         .rejects.toThrow('Authentication required');
       expect(mockIBClient.reauthenticate).not.toHaveBeenCalled();
     });
+
+    it('should call reauthenticate when auth status flips to true', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockResolvedValueOnce(false) // Initial check: not yet authenticated (skip early return)
+        .mockResolvedValueOnce(true)  // Browser path: now authenticated
+        .mockResolvedValueOnce(true); // Final re-check after reauth: still authenticated
+      mockIBClient.reauthenticate = vi.fn().mockResolvedValue(undefined);
+
+      await (handlers as any).ensureAuth();
+
+      expect(mockIBClient.reauthenticate).toHaveBeenCalled();
+    });
+
+    it('should proceed when reauthenticate fails but session is still authenticated', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockResolvedValueOnce(false) // Initial check: skip early return
+        .mockResolvedValueOnce(true)  // Browser path: authenticated
+        .mockResolvedValueOnce(true); // Final re-check still passes
+      mockIBClient.reauthenticate = vi.fn().mockRejectedValue(new Error('Reauth failed'));
+
+      // Reauth error is swallowed because the final auth status check still succeeds.
+      await expect((handlers as any).ensureAuth()).resolves.not.toThrow();
+      expect(mockIBClient.reauthenticate).toHaveBeenCalled();
+    });
+
+    it('should throw when reauthenticate fails and session is no longer authenticated', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockResolvedValueOnce(false) // Initial check: skip early return
+        .mockResolvedValueOnce(true)  // Browser path: authenticated
+        .mockResolvedValueOnce(false); // Final re-check: session lost
+      mockIBClient.reauthenticate = vi.fn().mockRejectedValue(new Error('Reauth failed'));
+
+      await expect((handlers as any).ensureAuth())
+        .rejects.toThrow('Authentication required');
+      expect(mockIBClient.reauthenticate).toHaveBeenCalled();
+    });
   });
 
   describe('startBrowserAuthPolling', () => {
@@ -457,6 +454,41 @@ describe('ToolHandlers', () => {
     it('should poll and call reauthenticate when auth detected', async () => {
       mockIBClient.checkAuthenticationStatus = vi.fn()
         .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      mockIBClient.reauthenticate = vi.fn().mockResolvedValue(undefined);
+
+      (handlers as any).startBrowserAuthPolling('https://localhost:5000', 5000);
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(mockIBClient.checkAuthenticationStatus).toHaveBeenCalledTimes(2);
+      expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
+    });
+
+    it('should stop polling once the deadline passes when auth never detected', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(false);
+      mockIBClient.reauthenticate = vi.fn();
+
+      (handlers as any).startBrowserAuthPolling('https://localhost:5000', 5000);
+      // Advance past the 2-minute deadline.
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // Deadline-based loop produces fewer than the legacy 60 attempts since the
+      // backoff caps at 10s. We assert (a) reauthenticate was never called and
+      // (b) polling stayed within the documented 2-minute upper bound.
+      expect(mockIBClient.reauthenticate).not.toHaveBeenCalled();
+      const attemptsWithinDeadline = (mockIBClient.checkAuthenticationStatus as any).mock.calls.length;
+      expect(attemptsWithinDeadline).toBeGreaterThan(0);
+      expect(attemptsWithinDeadline).toBeLessThan(60);
+
+      // Advancing further must not produce additional polls.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect((mockIBClient.checkAuthenticationStatus as any).mock.calls.length)
+        .toBe(attemptsWithinDeadline);
+    });
+
+    it('should handle checkAuthenticationStatus throwing without stopping', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockRejectedValueOnce(new Error('Network error'))
         .mockResolvedValueOnce(true);
       mockIBClient.reauthenticate = vi.fn().mockResolvedValue(undefined);
 
@@ -525,6 +557,146 @@ describe('ToolHandlers', () => {
         expect(response.error).toBe('Flex Query feature not configured');
         expect(response.message).toContain('IB_FLEX_TOKEN');
       });
+
+      it('should execute flex query when configured', async () => {
+        // Create a fresh context with flex query configuration
+        const mockFlexQueryClient = {
+          executeQuery: vi.fn().mockResolvedValue({
+            data: '<?xml version="1.0"?><FlexQueryResponse queryName="Test Query"><FlexStatements><FlexStatement /></FlexStatements></FlexQueryResponse>',
+          }),
+          parseStatement: vi.fn().mockResolvedValue({
+            FlexQueryResponse: {
+              queryName: 'Test Query',
+              FlexStatements: {},
+            },
+          }),
+        };
+
+        const mockFlexQueryStorage = {
+          getQueryByQueryId: vi.fn().mockResolvedValue(null),
+          saveQuery: vi.fn().mockResolvedValue({
+            id: 'query_1',
+            name: 'Test Query',
+            queryId: '123456',
+            createdAt: '2023-01-01T00:00:00.000Z',
+          }),
+          markQueryUsed: vi.fn().mockResolvedValue(undefined),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path'),
+        };
+
+        // Create NEW context with flex query setup
+        const flexContext: ToolHandlerContext = {
+          ibClient: mockIBClient,
+          gatewayManager: mockGatewayManager,
+          config: {
+            ...context.config,
+            IB_FLEX_TOKEN: 'test-token',
+          },
+          flexQueryClient: mockFlexQueryClient as any,
+          flexQueryStorage: mockFlexQueryStorage as any,
+        };
+
+        const flexHandlers = new ToolHandlers(flexContext);
+
+        const result = await flexHandlers.getFlexQuery({
+          queryId: '123456',  
+          parseXml: false,
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.queryId).toBe('123456');
+        expect(response.autoSaved).toBe(true);
+        expect(mockFlexQueryClient.executeQuery).toHaveBeenCalledWith('123456');
+        expect(mockFlexQueryStorage.saveQuery).toHaveBeenCalled();
+      });
+
+      it('should mark query as used when already exists', async () => {
+        const existingQuery = {
+          id: 'query_1',
+          name: 'Existing Query',
+          queryId: '123456',
+          createdAt: '2023-01-01T00:00:00.000Z',
+        };
+
+        const mockFlexQueryClient = {
+          executeQuery: vi.fn().mockResolvedValue({
+            data: '<?xml version="1.0"?><FlexQueryResponse queryName="Test Query"><FlexStatements /></FlexQueryResponse>',
+          }),
+          parseStatement: vi.fn().mockResolvedValue({
+            FlexQueryResponse: {
+              queryName: 'Test Query',
+            },
+          }),
+        };
+
+        const mockFlexQueryStorage = {
+          getQueryByQueryId: vi.fn().mockResolvedValue(existingQuery),
+          markQueryUsed: vi.fn().mockResolvedValue(undefined),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path'),
+        };
+
+        const flexContext: ToolHandlerContext = {
+          ibClient: mockIBClient,
+          gatewayManager: mockGatewayManager,
+          config: {
+            ...context.config,
+            IB_FLEX_TOKEN: 'test-token',
+          },
+          flexQueryClient: mockFlexQueryClient as any,
+          flexQueryStorage: mockFlexQueryStorage as any,
+        };
+
+        const flexHandlers = new ToolHandlers(flexContext);
+
+        const result = await flexHandlers.getFlexQuery({
+          queryId: '123456',
+          parseXml: false,
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.autoSaved).toBe(false);
+        expect(mockFlexQueryStorage.markQueryUsed).toHaveBeenCalledWith('query_1');
+      });
+
+      it('should handle flex query errors', async () => {
+        const mockFlexQueryClient = {
+          executeQuery: vi.fn().mockResolvedValue({
+            error: 'Invalid query ID',
+            errorCode: '1001',
+          }),
+        };
+
+        const mockFlexQueryStorage = {
+          getQueryByQueryId: vi.fn().mockResolvedValue(null),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path'),
+        };
+
+        const flexContext: ToolHandlerContext = {
+          ibClient: mockIBClient,
+          gatewayManager: mockGatewayManager,
+          config: {
+            ...context.config,
+            IB_FLEX_TOKEN: 'test-token',
+          },
+          flexQueryClient: mockFlexQueryClient as any,
+          flexQueryStorage: mockFlexQueryStorage as any,
+        };
+
+        const flexHandlers = new ToolHandlers(flexContext);
+
+        const result = await flexHandlers.getFlexQuery({
+          queryId: '123456',
+          parseXml: false,
+        });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.error).toBe('Invalid query ID');
+        expect(response.errorCode).toBe('1001');
+      });
     });
 
     describe('listFlexQueries', () => {
@@ -534,6 +706,48 @@ describe('ToolHandlers', () => {
         const response = JSON.parse(result.content[0].text);
         expect(response.error).toBe('Flex Query feature not configured');
       });
+
+      it('should list all saved queries', async () => {
+        const mockQueries = [
+          {
+            id: 'query_1',
+            name: 'Query 1',
+            queryId: '123',
+            createdAt: '2023-01-01T00:00:00.000Z',
+          },
+          {
+            id: 'query_2',
+            name: 'Query 2',
+            queryId: '456',
+            createdAt: '2023-01-02T00:00:00.000Z',
+          },
+        ];
+
+        const mockFlexQueryStorage = {
+          listQueries: vi.fn().mockResolvedValue(mockQueries),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path/flex-queries.json'),
+        };
+
+        const flexContext: ToolHandlerContext = {
+          ibClient: mockIBClient,
+          gatewayManager: mockGatewayManager,
+          config: {
+            ...context.config,
+            IB_FLEX_TOKEN: 'test-token',
+          },
+          flexQueryStorage: mockFlexQueryStorage as any,
+        };
+
+        const flexHandlers = new ToolHandlers(flexContext);
+
+        const result = await flexHandlers.listFlexQueries({ confirm: true });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.count).toBe(2);
+        expect(response.queries).toHaveLength(2);
+        expect(response.storageLocation).toBe('/mock/path/flex-queries.json');
+      });
     });
 
     describe('forgetFlexQuery', () => {
@@ -542,6 +756,96 @@ describe('ToolHandlers', () => {
 
         const response = JSON.parse(result.content[0].text);
         expect(response.error).toBe('Flex Query feature not configured');
+      });
+
+      it('should delete query by queryId', async () => {
+        const existingQuery = {
+          id: 'query_1',
+          name: 'Test Query',
+          queryId: '123456',
+          createdAt: '2023-01-01T00:00:00.000Z',
+        };
+
+        const mockFlexQueryStorage = {
+          getQueryByQueryId: vi.fn().mockResolvedValue(existingQuery),
+          getQueryByName: vi.fn().mockResolvedValue(null),
+          deleteQuery: vi.fn().mockResolvedValue(true),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path'),
+        };
+
+        const flexContext: ToolHandlerContext = {
+          ibClient: mockIBClient,
+          gatewayManager: mockGatewayManager,
+          config: {
+            ...context.config,
+            IB_FLEX_TOKEN: 'test-token',
+          },
+          flexQueryStorage: mockFlexQueryStorage as any,
+        };
+
+        const flexHandlers = new ToolHandlers(flexContext);
+
+        const result = await flexHandlers.forgetFlexQuery({ queryId: '123456' });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(response.message).toContain('Test Query');
+        expect(mockFlexQueryStorage.deleteQuery).toHaveBeenCalledWith('query_1');
+      });
+
+      it('should try name lookup as fallback', async () => {
+        const existingQuery = {
+          id: 'query_1',
+          name: 'Test Query',
+          queryId: '123456',
+          createdAt: '2023-01-01T00:00:00.000Z',
+        };
+
+        const mockFlexQueryStorage = {
+          getQueryByQueryId: vi.fn().mockResolvedValue(null),
+          getQueryByName: vi.fn().mockResolvedValue(existingQuery),
+          deleteQuery: vi.fn().mockResolvedValue(true),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path'),
+        };
+
+        const flexContext: ToolHandlerContext = {
+          ibClient: mockIBClient,
+          gatewayManager: mockGatewayManager,
+          config: {
+            ...context.config,
+            IB_FLEX_TOKEN: 'test-token',
+          },
+          flexQueryStorage: mockFlexQueryStorage as any,
+        };
+
+        const flexHandlers = new ToolHandlers(flexContext);
+
+        const result = await flexHandlers.forgetFlexQuery({ queryId: 'Test Query' });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.success).toBe(true);
+        expect(mockFlexQueryStorage.getQueryByName).toHaveBeenCalledWith('Test Query');
+      });
+
+      it('should return error when query not found', async () => {
+        const mockFlexQueryStorage = {
+          getQueryByQueryId: vi.fn().mockResolvedValue(null),
+          getQueryByName: vi.fn().mockResolvedValue(null),
+          initialize: vi.fn().mockResolvedValue(undefined),
+          getStorageFilePath: vi.fn().mockReturnValue('/mock/path'),
+        };
+
+        context.config.IB_FLEX_TOKEN = 'test-token';
+        context.flexQueryStorage = mockFlexQueryStorage as any;
+        handlers = new ToolHandlers(context);
+
+        const result = await handlers.forgetFlexQuery({ queryId: 'nonexistent' });
+
+        const response = JSON.parse(result.content[0].text);
+        expect(response.error).toBe('Query not found');
+        expect(response.message).toContain('nonexistent');
       });
     });
   });
