@@ -52,16 +52,7 @@ function parseArgs(): z.infer<typeof configSchema> {
           Logger.debug(`🔍 Set IB_AUTH_POLL_SECONDS to: ${nextArg}`);
           i++;
           break;
-        case 'ib-headless-auto-login':
-          if (nextArg && !nextArg.startsWith('--')) {
-            args.IB_HEADLESS_AUTO_LOGIN = nextArg.toLowerCase() === 'true';
-            Logger.debug(`🔍 Set IB_HEADLESS_AUTO_LOGIN to: ${nextArg.toLowerCase() === 'true'} (from arg: ${nextArg})`);
-            i++;
-          } else {
-            args.IB_HEADLESS_AUTO_LOGIN = true;
-            Logger.debug(`🔍 Set IB_HEADLESS_AUTO_LOGIN to: true (flag only)`);
-          }
-          break;
+
         case 'ib-headless-mode':
           // Support both --ib-headless-mode (boolean flag) and --ib-headless-mode=true/false
           if (nextArg && !nextArg.startsWith('--')) {
@@ -124,10 +115,7 @@ function parseArgs(): z.infer<typeof configSchema> {
           args.IB_AUTH_POLL_SECONDS = parseInt(value);
           Logger.debug(`🔍 Set IB_AUTH_POLL_SECONDS to: ${value}`);
           break;
-        case 'ib-headless-auto-login':
-          args.IB_HEADLESS_AUTO_LOGIN = value.toLowerCase() === 'true';
-          Logger.debug(`🔍 Set IB_HEADLESS_AUTO_LOGIN to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
-          break;
+
         case 'ib-headless-mode':
           args.IB_HEADLESS_MODE = value.toLowerCase() === 'true';
           Logger.debug(`🔍 Set IB_HEADLESS_MODE to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
@@ -158,7 +146,6 @@ export const configSchema = z.object({
   IB_AUTH_WAIT_SECONDS: z.number().optional(),
   IB_AUTH_POLL_SECONDS: z.number().optional(),
   IB_HEADLESS_MODE: z.boolean().optional(),
-  IB_HEADLESS_AUTO_LOGIN: z.boolean().optional(),
 
   // Paper trading configuration
   IB_PAPER_TRADING: z.boolean().optional(),
@@ -325,7 +312,6 @@ if (isMainModule) {
     IB_AUTH_WAIT_SECONDS: process.env.IB_AUTH_WAIT_SECONDS ? parseInt(process.env.IB_AUTH_WAIT_SECONDS) : undefined,
     IB_AUTH_POLL_SECONDS: process.env.IB_AUTH_POLL_SECONDS ? parseInt(process.env.IB_AUTH_POLL_SECONDS) : undefined,
     IB_HEADLESS_MODE: process.env.IB_HEADLESS_MODE === 'true',
-    IB_HEADLESS_AUTO_LOGIN: process.env.IB_HEADLESS_AUTO_LOGIN !== 'false',
     IB_READ_ONLY_MODE: process.env.IB_READ_ONLY_MODE === 'true',
 
   };
