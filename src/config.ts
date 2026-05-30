@@ -17,7 +17,6 @@ export const config = {
   IB_AUTH_WAIT_SECONDS: parseInt(process.env.IB_AUTH_WAIT_SECONDS || "60"),
   IB_AUTH_POLL_SECONDS: parseInt(process.env.IB_AUTH_POLL_SECONDS || "5"),
   IB_HEADLESS_MODE: process.env.IB_HEADLESS_MODE === "true",
-  IB_HEADLESS_AUTO_LOGIN: process.env.IB_HEADLESS_AUTO_LOGIN !== "false",
 
   // Paper trading configuration
   IB_PAPER_TRADING: process.env.IB_PAPER_TRADING === "true",

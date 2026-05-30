@@ -402,6 +402,9 @@ describe('ToolHandlers', () => {
       vi.mocked(mockIBClient.checkAuthenticationStatus).mockResolvedValue(false);
       
       const getAccountInfoPromise = handlers.getAccountInfo({ confirm: true });
+
+      // Prevent unhandled rejection warning by attaching a catch handler
+      getAccountInfoPromise.catch(() => {});
       
       // Let the event loop run to start the async operations
       await vi.advanceTimersByTimeAsync(1);
