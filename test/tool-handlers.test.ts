@@ -355,42 +355,11 @@ describe('ToolHandlers', () => {
       expect(HeadlessAuthenticator).not.toHaveBeenCalled();
     });
 
-    it('should continue the original tool call when auth succeeds within the default wait', async () => {
+    it('should trigger background auth and return started metadata immediately', async () => {
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
-      const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
-      mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
-      mockIBClient.checkAuthenticationStatus = vi.fn()
-        .mockResolvedValue(false);
-      vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
-        authenticate: vi.fn().mockResolvedValue({ success: true, status: 'SUCCESS' }),
-        close: vi.fn().mockResolvedValue(undefined),
-      }) as any);
-
-      handlers = new ToolHandlers(context);
-
-      const result = await handlers.getAccountInfo({ confirm: true });
-
-      const payload = JSON.parse(result.content[0].text);
-      expect(payload.accounts).toEqual(mockAccounts);
-      expect(mockIBClient.getAccountInfo).toHaveBeenCalled();
-    });
-
-    it('should wait up to the timeout before returning concise pending metadata if auth is waiting for 2FA', async () => {
-      context.config.IB_HEADLESS_MODE = true;
-      context.config.IB_USERNAME = 'testuser';
-      context.config.IB_PASSWORD_AUTH = 'testpass';
-      context.config.IB_AUTH_TIMEOUT = 10000; // 10 seconds for test
       mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(false);
-      vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
-        authenticate: vi.fn().mockResolvedValue({
-          success: false,
-          status: 'WAITING_FOR_USER_2FA',
-          message: 'IBKR reports that it sent a mobile notification and is waiting for approval'
-        }),
-        close: vi.fn().mockResolvedValue(undefined),
-      }) as any);
 
       handlers = new ToolHandlers(context);
 
@@ -398,18 +367,16 @@ describe('ToolHandlers', () => {
 
       expect(result.content).toBeDefined();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.status).toBe('AUTHENTICATION_PENDING');
+      expect(payload.status).toBe('AUTHENTICATION_STARTED');
       expect(payload.pendingAction).toBe(true);
       expect(payload.requiresUserAction).toBe(true);
       expect(payload.checkAgainSeconds).toBe(10);
-      expect(payload.maxWaitSeconds).toBe(10);
-      expect(payload.waitedSeconds).toBe(10);
       expect(payload.url).toContain('5000');
       expect(payload.userAction).toContain('Approve');
       expect(payload.nextInstruction).toBe('Wait 10 seconds, then check account info again.');
-      expect(payload.message).toBe('IBKR reports that it sent a mobile notification and is waiting for approval');
-      expect(JSON.stringify(payload).toLowerCase()).not.toContain('retry');
+      expect(payload.message).toBe('Headless authentication has been started in the background.');
       expect(mockIBClient.getAccountInfo).not.toHaveBeenCalled();
+      expect(HeadlessAuthenticator).toHaveBeenCalled();
     });
   });
 

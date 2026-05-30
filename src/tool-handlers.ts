@@ -145,85 +145,6 @@ export class ToolHandlers {
     };
   }
 
-  private async waitForHeadlessAuthentication(
-    authPromise: Promise<HeadlessAuthOutcome>,
-    maxWaitSeconds: number,
-    pollSeconds: number,
-    authenticator: HeadlessAuthenticator,
-  ): Promise<{ authenticated: boolean; outcome?: HeadlessAuthOutcome; waitedSeconds: number }> {
-    const startedAt = Date.now();
-    const deadline = startedAt + maxWaitSeconds * 1000;
-    let outcome: HeadlessAuthOutcome | undefined;
-
-    authPromise
-      .then((result) => {
-        outcome = result;
-      })
-      .catch((error) => {
-        outcome = {
-          success: false,
-          status: "ERROR",
-          message: "Headless authentication failed.",
-          error: error instanceof Error ? error.message : String(error),
-        };
-      });
-
-    const checkAuthenticated = async (): Promise<boolean> => {
-      try {
-        return await this.context.ibClient.checkAuthenticationStatus();
-      } catch (error) {
-        Logger.debug("[AUTH-WAIT] Auth status check failed while waiting:", error);
-        return false;
-      }
-    };
-
-    const getWaitedSeconds = (): number => {
-      const elapsed = Math.round((Date.now() - startedAt) / 1000);
-      return Math.min(elapsed, maxWaitSeconds);
-    };
-
-    while (Date.now() < deadline) {
-      if (outcome?.success || await checkAuthenticated()) {
-        if (!outcome?.browserKeptOpen) {
-          await authenticator.close().catch(() => {});
-        }
-        return {
-          authenticated: true,
-          outcome,
-          waitedSeconds: getWaitedSeconds(),
-        };
-      }
-
-      if (outcome && outcome.status !== "WAITING_FOR_USER_2FA") {
-        return {
-          authenticated: false,
-          outcome,
-          waitedSeconds: getWaitedSeconds(),
-        };
-      }
-
-      const remainingMs = deadline - Date.now();
-      await this.sleep(Math.min(pollSeconds * 1000, remainingMs));
-    }
-
-    if (outcome?.success || await checkAuthenticated()) {
-      if (!outcome?.browserKeptOpen) {
-        await authenticator.close().catch(() => {});
-      }
-      return {
-        authenticated: true,
-        outcome,
-        waitedSeconds: getWaitedSeconds(),
-      };
-    }
-
-    return {
-      authenticated: false,
-      outcome,
-      waitedSeconds: getWaitedSeconds(),
-    };
-  }
-
   // Authentication management
   private async ensureAuth(): Promise<AuthGuardResult> {
     // Ensure Gateway is ready first
@@ -271,53 +192,43 @@ export class ToolHandlers {
         };
       }
 
-      const authTimeout = Number(this.context.config.IB_AUTH_TIMEOUT) || 300000;
-
       const authConfig: HeadlessAuthConfig = {
         url: authUrl,
         username: this.context.config.IB_USERNAME,
         password: this.context.config.IB_PASSWORD_AUTH,
-        timeout: authTimeout,
+        timeout: this.context.config.IB_AUTH_TIMEOUT,
         ibClient: this.context.ibClient, // Pass the IB client for authentication checking
         paperTrading: this.context.config.IB_PAPER_TRADING,
       };
 
-      Logger.info("⚡ Headless authentication triggered; waiting for full authentication (blocking)...");
+      // Trigger authentication in the background (completely non-blocking)
+      Logger.info("⚡ Headless authentication triggered in background.");
       const authenticator = new HeadlessAuthenticator();
-      const outcome = await authenticator.authenticate(authConfig);
-
-      if (outcome.success) {
-        return { ok: true };
+      const p = authenticator.authenticate(authConfig) as Promise<HeadlessAuthOutcome>;
+      if (p && typeof p.then === "function") {
+        p.then(async (result) => {
+          if (!result.browserKeptOpen) {
+            await authenticator.close().catch(() => {});
+          }
+          Logger.info(`🎯 Background headless authentication completed: success=${result.success}`);
+        }).catch(async (err) => {
+          await authenticator.close().catch(() => {});
+          Logger.error("❌ Background headless authentication failed:", err);
+        });
       }
 
-      if (outcome.status === "WAITING_FOR_USER_2FA") {
-        return {
-          ok: false,
-          result: this.jsonResult({
-            status: "AUTHENTICATION_PENDING",
-            pendingAction: true,
-            requiresUserAction: true,
-            checkAgainSeconds: DEFAULT_AUTH_CHECK_AGAIN_SECONDS,
-            maxWaitSeconds: Math.round(authTimeout / 1000),
-            waitedSeconds: Math.round(authTimeout / 1000),
-            url: authUrl,
-            userAction: "Approve the IBKR two-factor authentication challenge.",
-            message: outcome.message || "IBKR authentication is still pending.",
-            nextInstruction: `Wait ${DEFAULT_AUTH_CHECK_AGAIN_SECONDS} seconds, then check account info again.`,
-          }),
-        };
-      }
-
+      // Return immediately without waiting/polling
       return {
         ok: false,
         result: this.jsonResult({
-          success: false,
-          status: outcome.status || "AUTHENTICATION_FAILED",
-          pendingAction: false,
+          status: "AUTHENTICATION_STARTED",
+          pendingAction: true,
           requiresUserAction: true,
-          message: outcome.message || "Headless authentication failed.",
-          error: outcome.error,
+          checkAgainSeconds: DEFAULT_AUTH_CHECK_AGAIN_SECONDS,
           url: authUrl,
+          userAction: "Approve the IBKR two-factor authentication challenge if prompted.",
+          message: "Headless authentication has been started in the background.",
+          nextInstruction: `Wait ${DEFAULT_AUTH_CHECK_AGAIN_SECONDS} seconds, then check account info again.`,
         }),
       };
     } else {
