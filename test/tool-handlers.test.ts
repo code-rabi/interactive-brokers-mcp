@@ -355,38 +355,7 @@ describe('ToolHandlers', () => {
       expect(HeadlessAuthenticator).not.toHaveBeenCalled();
     });
 
-    it('should continue the original tool call when auth succeeds within the default wait', async () => {
-      vi.useFakeTimers();
-
-      context.config.IB_HEADLESS_MODE = true;
-      context.config.IB_USERNAME = 'testuser';
-      context.config.IB_PASSWORD_AUTH = 'testpass';
-      const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
-      mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
-      mockIBClient.checkAuthenticationStatus = vi.fn()
-        .mockResolvedValue(false);
-      vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
-        authenticate: vi.fn().mockReturnValue(new Promise((resolve) => {
-          setTimeout(() => resolve({ success: true, status: 'SUCCESS' }), 5_000);
-        })),
-        close: vi.fn().mockResolvedValue(undefined),
-      }) as any);
-
-      handlers = new ToolHandlers(context);
-
-      const resultPromise = handlers.getAccountInfo({ confirm: true });
-      await vi.advanceTimersByTimeAsync(5_000);
-      const result = await resultPromise;
-
-      const payload = JSON.parse(result.content[0].text);
-      expect(payload.accounts).toEqual(mockAccounts);
-      expect(mockIBClient.getAccountInfo).toHaveBeenCalled();
-      vi.useRealTimers();
-    });
-
-    it('should wait the default auth window before returning concise pending metadata', async () => {
-      vi.useFakeTimers();
-
+    it('should trigger background auth and return started metadata immediately', async () => {
       context.config.IB_HEADLESS_MODE = true;
       context.config.IB_USERNAME = 'testuser';
       context.config.IB_PASSWORD_AUTH = 'testpass';
@@ -394,25 +363,20 @@ describe('ToolHandlers', () => {
 
       handlers = new ToolHandlers(context);
 
-      const resultPromise = handlers.getAccountInfo({ confirm: true });
-      await vi.advanceTimersByTimeAsync(60_000);
-      const result = await resultPromise;
+      const result = await handlers.getAccountInfo({ confirm: true });
 
       expect(result.content).toBeDefined();
       const payload = JSON.parse(result.content[0].text);
-      expect(payload.status).toBe('AUTHENTICATION_PENDING');
+      expect(payload.status).toBe('AUTHENTICATION_STARTED');
       expect(payload.pendingAction).toBe(true);
       expect(payload.requiresUserAction).toBe(true);
       expect(payload.checkAgainSeconds).toBe(10);
-      expect(payload.maxWaitSeconds).toBe(60);
-      expect(payload.waitedSeconds).toBe(60);
       expect(payload.url).toContain('5000');
       expect(payload.userAction).toContain('Approve');
       expect(payload.nextInstruction).toBe('Wait 10 seconds, then check account info again.');
-      expect(payload.message).toBe('IBKR authentication is still pending.');
-      expect(JSON.stringify(payload).toLowerCase()).not.toContain('retry');
+      expect(payload.message).toBe('Headless authentication has been started in the background.');
       expect(mockIBClient.getAccountInfo).not.toHaveBeenCalled();
-      vi.useRealTimers();
+      expect(HeadlessAuthenticator).toHaveBeenCalled();
     });
   });
 
