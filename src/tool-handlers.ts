@@ -238,6 +238,22 @@ export class ToolHandlers {
     // If in headless mode, start automatic headless authentication in the background
     if (this.context.config.IB_HEADLESS_MODE) {
       const authUrl = this.buildAuthUrl();
+
+      // If headless auto-login is disabled, don't trigger Playwright automatically
+      if (this.context.config.IB_HEADLESS_AUTO_LOGIN === false) {
+        return {
+          ok: false,
+          result: this.jsonResult({
+            success: false,
+            status: "AUTHENTICATION_REQUIRED",
+            pendingAction: false,
+            requiresUserAction: true,
+            message: "Authentication is required, but headless auto-login is disabled.",
+            nextInstruction: "Please call the 'authenticate' tool to complete the authentication process.",
+            url: authUrl,
+          }),
+        };
+      }
       
       // Validate that we have credentials for headless mode
       if (!this.context.config.IB_USERNAME || !this.context.config.IB_PASSWORD_AUTH) {

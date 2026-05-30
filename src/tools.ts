@@ -36,8 +36,8 @@ export function registerTools(
   // Create handlers instance
   const handlers = new ToolHandlers(context);
 
-  // Register authenticate tool (skip if in headless mode)
-  if (!userConfig?.IB_HEADLESS_MODE) {
+  // Register authenticate tool (skip if in headless mode and auto login is enabled)
+  if (!userConfig?.IB_HEADLESS_MODE || userConfig?.IB_HEADLESS_AUTO_LOGIN === false) {
     server.tool(
       "authenticate",
       "Authenticate with Interactive Brokers. Usage: `{ \"confirm\": true }`.",
