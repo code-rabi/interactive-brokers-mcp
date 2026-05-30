@@ -36,12 +36,15 @@ export function registerTools(
   // Create handlers instance
   const handlers = new ToolHandlers(context);
 
-  server.tool(
-    "authenticate",
-    "Authenticate with Interactive Brokers. Usage: `{ \"confirm\": true }`.",
-    AuthenticateZodShape,
-    async (args) => await handlers.authenticate(args)
-  );
+  // Register authenticate tool (skip if in headless mode and auto login is enabled)
+  if (!userConfig?.IB_HEADLESS_MODE || userConfig?.IB_HEADLESS_AUTO_LOGIN === false) {
+    server.tool(
+      "authenticate",
+      "Authenticate with Interactive Brokers. Usage: `{ \"confirm\": true }`.",
+      AuthenticateZodShape,
+      async (args) => await handlers.authenticate(args)
+    );
+  }
 
   // Register get_account_info tool
   server.tool(

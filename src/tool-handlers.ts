@@ -52,6 +52,7 @@ type HeadlessAuthOutcome = {
 
 const DEFAULT_AUTH_WAIT_SECONDS = 60;
 const DEFAULT_AUTH_POLL_SECONDS = 5;
+const DEFAULT_AUTH_CHECK_AGAIN_SECONDS = 10;
 
 export class ToolHandlers {
   private context: ToolHandlerContext;
@@ -125,84 +126,230 @@ export class ToolHandlers {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private buildAwaitingAuthenticationPayload(
+    authUrl: string,
+    maxWaitSeconds: number,
+    waitedSeconds: number,
+  ): Record<string, unknown> {
+    return {
+      status: "AUTHENTICATION_PENDING",
+      pendingAction: true,
+      requiresUserAction: true,
+      checkAgainSeconds: DEFAULT_AUTH_CHECK_AGAIN_SECONDS,
+      maxWaitSeconds,
+      waitedSeconds,
+      url: authUrl,
+      userAction: "Approve the IBKR two-factor authentication challenge.",
+      message: "IBKR authentication is still pending.",
+      nextInstruction: `Wait ${DEFAULT_AUTH_CHECK_AGAIN_SECONDS} seconds, then check account info again.`,
+    };
+  }
+
+  private async waitForHeadlessAuthentication(
+    authPromise: Promise<HeadlessAuthOutcome>,
+    maxWaitSeconds: number,
+    pollSeconds: number,
+    authenticator: HeadlessAuthenticator,
+  ): Promise<{ authenticated: boolean; outcome?: HeadlessAuthOutcome; waitedSeconds: number }> {
+    const startedAt = Date.now();
+    const deadline = startedAt + maxWaitSeconds * 1000;
+    let outcome: HeadlessAuthOutcome | undefined;
+
+    authPromise
+      .then((result) => {
+        outcome = result;
+      })
+      .catch((error) => {
+        outcome = {
+          success: false,
+          status: "ERROR",
+          message: "Headless authentication failed.",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      });
+
+    const checkAuthenticated = async (): Promise<boolean> => {
+      try {
+        return await this.context.ibClient.checkAuthenticationStatus();
+      } catch (error) {
+        Logger.debug("[AUTH-WAIT] Auth status check failed while waiting:", error);
+        return false;
+      }
+    };
+
+    const getWaitedSeconds = (): number => {
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      return Math.min(elapsed, maxWaitSeconds);
+    };
+
+    while (Date.now() < deadline) {
+      if (outcome?.success || await checkAuthenticated()) {
+        if (!outcome?.browserKeptOpen) {
+          await authenticator.close().catch(() => {});
+        }
+        return {
+          authenticated: true,
+          outcome,
+          waitedSeconds: getWaitedSeconds(),
+        };
+      }
+
+      if (outcome && outcome.status !== "WAITING_FOR_USER_2FA") {
+        return {
+          authenticated: false,
+          outcome,
+          waitedSeconds: getWaitedSeconds(),
+        };
+      }
+
+      const remainingMs = deadline - Date.now();
+      await this.sleep(Math.min(pollSeconds * 1000, remainingMs));
+    }
+
+    if (outcome?.success || await checkAuthenticated()) {
+      if (!outcome?.browserKeptOpen) {
+        await authenticator.close().catch(() => {});
+      }
+      return {
+        authenticated: true,
+        outcome,
+        waitedSeconds: getWaitedSeconds(),
+      };
+    }
+
+    return {
+      authenticated: false,
+      outcome,
+      waitedSeconds: getWaitedSeconds(),
+    };
+  }
+
   // Authentication management
   private async ensureAuth(): Promise<AuthGuardResult> {
     // Ensure Gateway is ready first
     await this.ensureGatewayReady();
-
+    
     // Check if already authenticated
-    let isAuthenticated = await this.context.ibClient.checkAuthenticationStatus();
+    const isAuthenticated = await this.context.ibClient.checkAuthenticationStatus();
     if (isAuthenticated) {
       return { ok: true };
     }
 
-    // If not authenticated, and not in headless mode, throw an error immediately.
-    if (!this.context.config.IB_HEADLESS_MODE) {
+    // If in headless mode, start automatic headless authentication in the background
+    if (this.context.config.IB_HEADLESS_MODE) {
       const authUrl = this.buildAuthUrl();
-      throw new Error(`Authentication required. Please use the 'authenticate' tool to complete the authentication process at ${authUrl}.`);
-    }
 
-    // --- Headless Mode Logic ---
-    // Validate that we have credentials for headless mode
-    if (!this.context.config.IB_USERNAME || !this.context.config.IB_PASSWORD_AUTH) {
+      // If headless auto-login is disabled, don't trigger Playwright automatically
+      if (this.context.config.IB_HEADLESS_AUTO_LOGIN === false) {
+        return {
+          ok: false,
+          result: this.jsonResult({
+            success: false,
+            status: "AUTHENTICATION_REQUIRED",
+            pendingAction: false,
+            requiresUserAction: true,
+            message: "Authentication is required, but headless auto-login is disabled.",
+            nextInstruction: "Please call the 'authenticate' tool to complete the authentication process.",
+            url: authUrl,
+          }),
+        };
+      }
+      
+      // Validate that we have credentials for headless mode
+      if (!this.context.config.IB_USERNAME || !this.context.config.IB_PASSWORD_AUTH) {
+        return {
+          ok: false,
+          result: this.jsonResult({
+            success: false,
+            status: "AUTHENTICATION_CONFIGURATION_REQUIRED",
+            pendingAction: false,
+            requiresUserAction: true,
+            message: "Headless authentication credentials are missing.",
+            nextInstruction: "Set IB_USERNAME and IB_PASSWORD_AUTH, then check account info again.",
+            url: authUrl,
+          }),
+        };
+      }
+
+      const authTimeout = Number(this.context.config.IB_AUTH_TIMEOUT) || 300000;
+
+      const authConfig: HeadlessAuthConfig = {
+        url: authUrl,
+        username: this.context.config.IB_USERNAME,
+        password: this.context.config.IB_PASSWORD_AUTH,
+        timeout: authTimeout,
+        ibClient: this.context.ibClient, // Pass the IB client for authentication checking
+        paperTrading: this.context.config.IB_PAPER_TRADING,
+      };
+
+      Logger.info("⚡ Headless authentication triggered; waiting for full authentication (blocking)...");
+      const authenticator = new HeadlessAuthenticator();
+      const outcome = await authenticator.authenticate(authConfig);
+
+      if (outcome.success) {
+        return { ok: true };
+      }
+
+      if (outcome.status === "WAITING_FOR_USER_2FA") {
+        return {
+          ok: false,
+          result: this.jsonResult({
+            status: "AUTHENTICATION_PENDING",
+            pendingAction: true,
+            requiresUserAction: true,
+            checkAgainSeconds: DEFAULT_AUTH_CHECK_AGAIN_SECONDS,
+            maxWaitSeconds: Math.round(authTimeout / 1000),
+            waitedSeconds: Math.round(authTimeout / 1000),
+            url: authUrl,
+            userAction: "Approve the IBKR two-factor authentication challenge.",
+            message: outcome.message || "IBKR authentication is still pending.",
+            nextInstruction: `Wait ${DEFAULT_AUTH_CHECK_AGAIN_SECONDS} seconds, then check account info again.`,
+          }),
+        };
+      }
+
       return {
         ok: false,
         result: this.jsonResult({
           success: false,
-          status: "AUTHENTICATION_CONFIGURATION_REQUIRED",
-          message: "Headless authentication credentials are missing.",
-          nextInstruction: "Set IB_USERNAME and IB_PASSWORD_AUTH, then try again.",
+          status: outcome.status || "AUTHENTICATION_FAILED",
+          pendingAction: false,
+          requiresUserAction: true,
+          message: outcome.message || "Headless authentication failed.",
+          error: outcome.error,
+          url: authUrl,
         }),
       };
-    }
-    
-    // Configuration for the polling loop
-    const timeoutSeconds = this.context.config.IB_AUTH_TIMEOUT || 300; // 5 minutes default
-    const pollIntervalSeconds = 5;
-    const deadline = Date.now() + timeoutSeconds * 1000;
-
-    Logger.info(`⚡ Headless authentication required. Starting process with a ${timeoutSeconds}s timeout.`);
-
-    // Trigger headless authentication once, but don't wait for the promise here.
-    // The promise is handled to log results, but the primary flow control is the polling loop.
-    const authUrl = this.buildAuthUrl();
-    const authConfig: HeadlessAuthConfig = {
-      url: authUrl,
-      username: this.context.config.IB_USERNAME,
-      password: this.context.config.IB_PASSWORD_AUTH,
-      timeout: timeoutSeconds * 1000, // authenticator timeout in ms
-      ibClient: this.context.ibClient,
-      paperTrading: this.context.config.IB_PAPER_TRADING,
-    };
-
-    const authenticator = new HeadlessAuthenticator();
-    // Fire-and-forget the auth trigger, but handle its completion for logging/cleanup
-    authenticator.authenticate(authConfig)
-      .then(async (result) => {
-        if (!result.browserKeptOpen) {
-          await authenticator.close().catch(() => {});
-        }
-        Logger.info(`🎯 Headless authentication process completed: success=${result.success}`);
-      })
-      .catch(async (err) => {
-        await authenticator.close().catch(() => {});
-        Logger.error("❌ Headless authentication process failed:", err);
-      });
-
-    // Start the blocking polling loop
-    while (Date.now() < deadline) {
-      Logger.debug("Polling for authentication status...");
-      isAuthenticated = await this.context.ibClient.checkAuthenticationStatus();
-      if (isAuthenticated) {
-        Logger.info("✅ Authentication successful.");
-        return { ok: true };
+    } else {
+      // In non-headless mode, check if the gateway is already authenticated
+      // (the user may have completed browser auth via the authenticate tool)
+      const authStatus = await this.context.ibClient.checkAuthenticationStatus();
+      if (!authStatus) {
+        const port = this.context.gatewayManager 
+          ? this.context.gatewayManager.getCurrentPort() 
+          : this.context.config.IB_GATEWAY_PORT;
+        const authUrl = `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
+        throw new Error(`Authentication required. Please use the 'authenticate' tool to complete the authentication process at ${authUrl}.`);
       }
-      await this.sleep(pollIntervalSeconds * 1000);
-    }
+      // Auth status is true, reauthenticate the REST session if needed
+      try {
+        await this.context.ibClient.reauthenticate();
+      } catch (e) {
+        Logger.warn("[ENSURE-AUTH] Reauthenticate after status check failed, will re-check auth status:", e);
+      }
+      // Re-check auth status to honor the ensureAuth contract: if reauthenticate left
+      // the session unauthenticated, propagate the error rather than silently proceeding.
+      const finalAuthStatus = await this.context.ibClient.checkAuthenticationStatus();
+      if (!finalAuthStatus) {
+        const port = this.context.gatewayManager
+          ? this.context.gatewayManager.getCurrentPort()
+          : this.context.config.IB_GATEWAY_PORT;
+        const authUrl = `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
+        throw new Error(`Authentication required. Please use the 'authenticate' tool to complete the authentication process at ${authUrl}.`);
+      }
 
-    // If the loop completes without success, we've timed out
-    Logger.error(`❌ Authentication timed out after ${timeoutSeconds} seconds.`);
-    throw new Error(`Authentication timed out after ${timeoutSeconds} seconds. Please check for a 2FA notification on your device.`);
+      return { ok: true };
+    }
   }
 
   // Helper function to check for authentication errors
@@ -447,11 +594,18 @@ export class ToolHandlers {
   }
 
   async getAccountInfo(input: GetAccountInfoInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.getAccountInfo();
       return {
         content: [
@@ -474,21 +628,28 @@ export class ToolHandlers {
   }
 
   async getPositions(input: GetPositionsInput): Promise<ToolHandlerResult> {
-    if (!input.accountId) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Account ID is required",
-          },
-        ],
-      };
-    }
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      if (!input.accountId) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Account ID is required",
+            },
+          ],
+        };
+      }
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.getPositions(input.accountId);
       return {
         content: [
@@ -511,11 +672,18 @@ export class ToolHandlers {
   }
 
   async getMarketData(input: GetMarketDataInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.getMarketData(input.symbol, input.exchange);
       return {
         content: [
@@ -538,11 +706,18 @@ export class ToolHandlers {
   }
 
   async placeOrder(input: PlaceOrderInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.placeOrder({
         accountId: input.accountId,
         symbol: input.symbol,
@@ -576,11 +751,18 @@ export class ToolHandlers {
   }
 
   async getOrderStatus(input: GetOrderStatusInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.getOrderStatus(input.orderId);
       return {
         content: [
@@ -603,11 +785,18 @@ export class ToolHandlers {
   }
 
   async getLiveOrders(input: GetLiveOrdersInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       // Pass accountId as query parameter if provided
       const result = await this.context.ibClient.getOrders(input.accountId);
       return {
@@ -631,11 +820,18 @@ export class ToolHandlers {
   }
 
   async confirmOrder(input: ConfirmOrderInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.confirmOrder(input.replyId, input.messageIds);
       return {
         content: [
@@ -658,11 +854,18 @@ export class ToolHandlers {
   }
 
   async getAlerts(input: GetAlertsInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.getAlerts(input.accountId);
       return {
         content: [
@@ -685,11 +888,18 @@ export class ToolHandlers {
   }
 
   async createAlert(input: CreateAlertInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.createAlert(input.accountId, input.alertRequest);
       return {
         content: [
@@ -712,11 +922,18 @@ export class ToolHandlers {
   }
 
   async activateAlert(input: ActivateAlertInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.activateAlert(input.accountId, input.alertId);
       return {
         content: [
@@ -739,11 +956,18 @@ export class ToolHandlers {
   }
 
   async deleteAlert(input: DeleteAlertInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      // Ensure Gateway is ready
+      await this.ensureGatewayReady();
+      
+      // Ensure authentication in headless mode
+      if (this.context.config.IB_HEADLESS_MODE) {
+        const auth = await this.ensureAuth();
+        if (!auth.ok) {
+          return auth.result;
+        }
+      }
+      
       const result = await this.context.ibClient.deleteAlert(input.accountId, input.alertId);
       return {
         content: [
