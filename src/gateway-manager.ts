@@ -669,7 +669,7 @@ export class IBGatewayManager {
       const runtimePath = path.join(this.gatewayDir, 'clientportal.gw/build/lib/runtime/*');
       const configDir = path.join(this.gatewayDir, 'clientportal.gw/root');
       
-      const classpath = `${configDir}:${jarPath}:${runtimePath}`;
+      const classpath = [configDir, jarPath, runtimePath].join(path.delimiter);
 
       this.log('🚀 Starting IB Gateway with bundled JRE...');
       this.log('   Java: ' + bundledJavaPath);
