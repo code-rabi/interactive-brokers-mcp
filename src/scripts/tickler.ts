@@ -1,86 +1,92 @@
 import { Agent } from "undici";
 
+import { HttpClient, HttpError } from "../http.js";
+
+interface AuthStatusResponse {
+  established?: boolean;
+  authenticated?: boolean;
+  connected?: boolean;
+}
+
+interface TickleResponse {
+  iserver?: {
+    authStatus?: AuthStatusResponse;
+  };
+}
+
 const args = process.argv.slice(2);
 const host = args[0] || "127.0.0.1";
 const port = Number(args[1]) || 5000;
 const sessionCookieHeader = process.env.IB_TICKLER_COOKIE_HEADER || "";
 
-const baseUrl = `https://${host}:${port}/v1/api`;
-const agent = new Agent({ connect: { rejectUnauthorized: false } });
+const client = new HttpClient({
+  baseUrl: `https://${host}:${port}/v1/api`,
+  timeout: 15000,
+  dispatcher: new Agent({
+    connect: {
+      rejectUnauthorized: false,
+    },
+  }),
+});
 
-async function request(method: string, path: string): Promise<{ data: any; status: number }> {
-  const headers: Record<string, string> = {};
-  if (sessionCookieHeader) {
-    headers.Cookie = sessionCookieHeader;
-  }
-  const response = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers,
-    signal: AbortSignal.timeout(15000),
-    dispatcher: agent,
-  });
-  const text = await response.text();
-  let data: any;
-  try { data = JSON.parse(text); } catch { data = text; }
-  if (!response.ok) {
-    const error = new Error(`HTTP ${response.status}`) as any;
-    error.response = { status: response.status, data };
-    throw error;
-  }
-  return { data, status: response.status };
+if (sessionCookieHeader) {
+  client.setHeader("Cookie", sessionCookieHeader);
 }
 
 function isStatusAuthenticated(status: unknown): boolean {
   if (!status || typeof status !== "object") {
     return false;
   }
-  const statusObj = status as { established?: boolean; authenticated?: boolean; connected?: boolean };
+
+  const statusObj = status as AuthStatusResponse;
   if (statusObj.established === true) {
     return true;
   }
+
   return statusObj.authenticated === true && statusObj.connected !== false;
+}
+
+async function request<T>(method: string, path: string): Promise<TickleResponse> {
+  const response = await client.request<T>(method, path);
+  return response.data as TickleResponse;
 }
 
 async function checkAndTickle(): Promise<boolean> {
   try {
-    let tickleResponse: { data: any; status: number };
+    let tickleResponse: TickleResponse;
+
     try {
-      tickleResponse = await request("POST", "/tickle");
-    } catch (error: any) {
-      if (error?.response?.status === 404 || error?.response?.status === 405) {
-        tickleResponse = await request("GET", "/tickle");
+      tickleResponse = await request<TickleResponse>("POST", "/tickle");
+    } catch (error) {
+      if (error instanceof HttpError && [404, 405].includes(error.response.status)) {
+        tickleResponse = await request<TickleResponse>("GET", "/tickle");
       } else {
         throw error;
       }
     }
 
-    const authStatus = tickleResponse.data?.iserver?.authStatus;
+    const authStatus = tickleResponse.iserver?.authStatus;
     if (authStatus && !isStatusAuthenticated(authStatus)) {
-      console.log(`[TICKLER] Tickle returned unauthenticated status. Self-terminating.`);
+      console.log("[TICKLER] Session no longer authenticated. Self-terminating.");
       return false;
     }
 
-    const statusResponse = await request("GET", "/iserver/auth/status");
-    if (!isStatusAuthenticated(statusResponse.data)) {
-      console.log(`[TICKLER] Auth status check returned unauthenticated. Self-terminating.`);
-      return false;
-    }
-
-    console.log(`[TICKLER] Tickle & authentication verified successfully`);
+    console.log("[TICKLER] Session tickled and authentication verified successfully");
     return true;
-  } catch (error: unknown) {
-    const err = error as { message?: string; response?: { status?: number } };
-    console.error(`[TICKLER] Connection/request error:`, err?.message || String(error));
-    if (err?.response?.status === 401) {
-      console.log(`[TICKLER] HTTP 401 Unauthorized encountered. Self-terminating.`);
+  } catch (error) {
+    if (error instanceof HttpError && error.response.status === 401) {
+      console.log("[TICKLER] HTTP 401 Unauthorized encountered. Self-terminating.");
       return false;
     }
-    console.log(`[TICKLER] Gateway unreachable or network error. Self-terminating.`);
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[TICKLER] Connection/request error:", message);
+    console.log("[TICKLER] Gateway unreachable or network error. Self-terminating.");
     return false;
   }
 }
 
-async function run() {
+async function run(): Promise<void> {
   console.log(`[TICKLER] Persistent session tickler started for ${host}:${port} (PID: ${process.pid})`);
 
   const ok = await checkAndTickle();
@@ -92,7 +98,7 @@ async function run() {
     const stillOk = await checkAndTickle();
     if (!stillOk) {
       clearInterval(interval);
-      console.log(`[TICKLER] Terminating ticker loop.`);
+      console.log("[TICKLER] Terminating ticker loop.");
       process.exit(0);
     }
   }, 30000);
