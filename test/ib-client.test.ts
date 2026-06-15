@@ -649,56 +649,39 @@ describe('IBClient', () => {
     });
 
     it('should initialize brokerage session using SSO HARDWARE_INFO when auth status omits hardware_info', async () => {
-      const mockAuthClient = {
-        post: vi.fn().mockResolvedValue({ data: {}, status: 200 }),
-        get: vi.fn()
-          .mockResolvedValueOnce({
-            data: {
-              RESULT: true,
-              HARDWARE_INFO: '71a482fc|06:7F:1D:C4:36:2F',
-            },
-            status: 200,
-          })
-          .mockResolvedValueOnce({
-            data: {
-              authenticated: false,
-              connected: true,
-              MAC: 'AA:AA:AA:AA:AA:AA',
-            },
-            status: 200,
-          })
-          .mockRejectedValueOnce(new Error('not ready'))
-          .mockResolvedValueOnce({ data: {}, status: 200 })
-          .mockResolvedValueOnce({ data: [], status: 200 })
-          .mockResolvedValueOnce({
-            data: { authenticated: true, connected: true, established: true },
-            status: 200,
-          }),
-      };
-
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
+      mockFetch
+        .mockResolvedValueOnce(mockResponse({
+          RESULT: true,
+          HARDWARE_INFO: '71a482fc|06:7F:1D:C4:36:2F',
+        }))
+        .mockResolvedValueOnce(mockResponse({
+          authenticated: false,
+          connected: true,
+          MAC: 'AA:AA:AA:AA:AA:AA',
+        }))
+        .mockRejectedValueOnce(new Error('not ready'))
+        .mockResolvedValueOnce(mockResponse({}))
+        .mockResolvedValueOnce(mockResponse({}))
+        .mockResolvedValueOnce(mockResponse({}))
+        .mockResolvedValueOnce(mockResponse({}))
+        .mockResolvedValueOnce(mockResponse({}))
+        .mockResolvedValueOnce(mockResponse({}))
+        .mockResolvedValueOnce(mockResponse({
+          authenticated: true,
+          connected: true,
+          established: true,
+        }));
 
       await expect(client.initializeBrokerageSession()).resolves.toBe(true);
 
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.stringContaining('machineId=71a482fc'),
-        expect.objectContaining({
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        })
-      );
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.stringContaining('mac=06-7F-1D-C4-36-2F'),
-        expect.any(Object)
-      );
-      expect(mockAuthClient.post).not.toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.stringContaining('mac=AA-AA-AA-AA-AA-AA'),
-        expect.any(Object)
-      );
+      const ssodhInitCall = findCall('/iserver/auth/ssodh/init');
+      expect(ssodhInitCall).toBeDefined();
+      expect(ssodhInitCall![1].method).toBe('POST');
+      expect(ssodhInitCall![1].headers['Content-Type']).toBe('application/x-www-form-urlencoded');
+      expect(ssodhInitCall![1].body).toContain('machineId=71a482fc');
+      expect(ssodhInitCall![1].body).toContain('mac=06-7F-1D-C4-36-2F');
+      expect(ssodhInitCall![1].body).not.toContain('mac=AA-AA-AA-AA-AA-AA');
     });
-
     it('should handle reauth when final status returns false', async () => {
       setupBrokerageInitMocks({
         finalStatus: { authenticated: false, connected: true },
