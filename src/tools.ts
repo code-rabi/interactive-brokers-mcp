@@ -36,7 +36,17 @@ export function registerTools(
   // Create handlers instance
   const handlers = new ToolHandlers(context);
 
-  server.tool(
+  // Avoid repeated heavy generic instantiation in the MCP SDK tool overloads.
+  const registerTool = (
+    name: string,
+    description: string,
+    schema: Record<string, unknown>,
+    handler: (args: any) => Promise<any>
+  ) => {
+    server.tool(name, description, schema as never, handler as never);
+  };
+
+  registerTool(
     "authenticate",
     "Authenticate with Interactive Brokers. Usage: `{ \"confirm\": true }`.",
     AuthenticateZodShape,
@@ -44,7 +54,7 @@ export function registerTools(
   );
 
   // Register get_account_info tool
-  server.tool(
+  registerTool(
     "get_account_info",
     "Get account information and balances. Usage: `{ \"confirm\": true }`.",
     GetAccountInfoZodShape,
@@ -52,7 +62,7 @@ export function registerTools(
   );
 
   // Register get_positions tool
-  server.tool(
+  registerTool(
     "get_positions",
     "Get current positions. Usage: `{}` or `{ \"accountId\": \"<id>\" }`.",
     GetPositionsZodShape,
@@ -60,7 +70,7 @@ export function registerTools(
   );
 
   // Register get_market_data tool
-  server.tool(
+  registerTool(
     "get_market_data",
     "Get real-time market data. Usage: `{ \"symbol\": \"AAPL\" }` or `{ \"symbol\": \"AAPL\", \"exchange\": \"NASDAQ\" }`.",
     GetMarketDataZodShape,
@@ -69,7 +79,7 @@ export function registerTools(
 
   // Register place_order tool (skip if in read-only mode)
   if (!userConfig?.IB_READ_ONLY_MODE) {
-    server.tool(
+    registerTool(
       "place_order",
       "Place a trading order. Examples:\n" +
       "- Market buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
@@ -82,7 +92,7 @@ export function registerTools(
   }
 
   // Register get_order_status tool
-  server.tool(
+  registerTool(
     "get_order_status",
     "Get the status of a specific order. Usage: `{ \"orderId\": \"12345\" }`.",
     GetOrderStatusZodShape,
@@ -90,7 +100,7 @@ export function registerTools(
   );
 
   // Register get_live_orders tool
-  server.tool(
+  registerTool(
     "get_live_orders",
     "Get all live/open orders for monitoring and validation. Usage: `{}` for all accounts or `{ \"accountId\": \"<id>\" }` for a specific account. " +
     "This is the recommended way to validate that market orders were executed successfully after placing them.",
@@ -100,7 +110,7 @@ export function registerTools(
 
   // Register confirm_order tool (skip if in read-only mode)
   if (!userConfig?.IB_READ_ONLY_MODE) {
-    server.tool(
+    registerTool(
       "confirm_order",
       "Manually confirm an order that requires confirmation. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\", \"messageIds\": [\"o10151\", \"o10153\"] }`.",
       ConfirmOrderZodShape,
@@ -109,7 +119,7 @@ export function registerTools(
   }
 
   // Register get_alerts tool
-  server.tool(
+  registerTool(
     "get_alerts",
     "Get all trading alerts for an account. Usage: `{ \"accountId\": \"<id>\" }`.",
     GetAlertsZodShape,
@@ -118,7 +128,7 @@ export function registerTools(
 
   // Register create_alert tool (skip if in read-only mode)
   if (!userConfig?.IB_READ_ONLY_MODE) {
-    server.tool(
+    registerTool(
       "create_alert",
       "Create a new trading alert. Usage: `{ \"accountId\": \"<id>\", \"alertRequest\": { \"alertName\": \"Price Alert\", \"conditions\": [{ \"conidex\": \"265598\", \"type\": \"price\", \"operator\": \">\", \"triggerMethod\": \"last\", \"value\": \"150\" }] } }`.",
       CreateAlertZodShape,
@@ -128,7 +138,7 @@ export function registerTools(
 
   // Register activate_alert tool (skip if in read-only mode)
   if (!userConfig?.IB_READ_ONLY_MODE) {
-    server.tool(
+    registerTool(
       "activate_alert",
       "Activate a previously created alert. Usage: `{ \"accountId\": \"<id>\", \"alertId\": \"<alertId>\" }`.",
       ActivateAlertZodShape,
@@ -138,7 +148,7 @@ export function registerTools(
 
   // Register delete_alert tool (skip if in read-only mode)
   if (!userConfig?.IB_READ_ONLY_MODE) {
-    server.tool(
+    registerTool(
       "delete_alert",
       "Delete an alert. Usage: `{ \"accountId\": \"<id>\", \"alertId\": \"<alertId>\" }`.",
       DeleteAlertZodShape,
@@ -148,7 +158,7 @@ export function registerTools(
 
   // Register Flex Query tools (only if token is configured)
   if (userConfig?.IB_FLEX_TOKEN) {
-    server.tool(
+    registerTool(
       "get_flex_query",
       "Execute a Flex Query and retrieve statements/data. The query will be automatically remembered for future use. " +
       "Usage: `{ \"queryId\": \"123456\" }` or with a friendly name: `{ \"queryId\": \"123456\", \"queryName\": \"Monthly Trades\" }`. " +
@@ -157,14 +167,14 @@ export function registerTools(
       async (args) => await handlers.getFlexQuery(args)
     );
 
-    server.tool(
+    registerTool(
       "list_flex_queries",
       "List all previously used Flex Queries that have been automatically saved. Usage: `{ \"confirm\": true }`.",
       ListFlexQueriesZodShape,
       async (args) => await handlers.listFlexQueries(args)
     );
 
-    server.tool(
+    registerTool(
       "forget_flex_query",
       "Remove a saved Flex Query from memory. Usage: `{ \"queryId\": \"123456\" }`.",
       ForgetFlexQueryZodShape,

@@ -20,10 +20,12 @@ describe('ToolHandlers', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(HeadlessAuthenticator).mockImplementation(() => ({
+  vi.mocked(HeadlessAuthenticator).mockImplementation(function MockHeadlessAuthenticator() {
+    return {
       authenticate: vi.fn().mockResolvedValue({ success: true }),
       close: vi.fn().mockResolvedValue(undefined),
-    }) as any);
+    } as any;
+  });
 
     // Create mock IBClient
     mockIBClient = {
