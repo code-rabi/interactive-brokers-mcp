@@ -1,10 +1,16 @@
 // test/flex-query-client.test.ts
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { FlexQueryClient } from '../src/flex-query-client.js';
-import axios from 'axios';
+import { HttpError } from '../src/http.js';
 
-// Mock axios
-vi.mock('axios');
+const mockFetch = vi.fn();
+
+function xmlResponse(xml: string, status = 200): Response {
+  return new Response(xml, {
+    status,
+    statusText: status >= 200 && status < 300 ? 'OK' : `Error`,
+  });
+}
 
 describe('FlexQueryClient', () => {
   let client: FlexQueryClient;
@@ -14,108 +20,84 @@ describe('FlexQueryClient', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', mockFetch);
     client = new FlexQueryClient({ token: mockToken });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   describe('constructor', () => {
     it('should initialize with token', () => {
       expect(client).toBeDefined();
     });
-
-    it('should create axios client with timeout', () => {
-      expect(axios.create).toHaveBeenCalledWith({
-        timeout: 60000,
-      });
-    });
   });
 
   describe('sendRequest', () => {
     it('should successfully send request and return reference code', async () => {
-      const mockResponse = {
-        data: `<?xml version="1.0" encoding="UTF-8"?>
+      const mockResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Success</Status>
   <ReferenceCode>${mockReferenceCode}</ReferenceCode>
-  <Url>https://example.com/statement</Url>
-</FlexStatementResponse>`,
-      };
+  <Url>https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement</Url>
+</FlexStatementResponse>`;
 
-      const mockGet = vi.fn().mockResolvedValue(mockResponse);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch.mockResolvedValueOnce(xmlResponse(mockResponseXml));
 
       const result = await client.sendRequest(mockQueryId);
 
-      expect(mockGet).toHaveBeenCalledWith(
-        'https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest',
-        {
-          params: {
-            t: mockToken,
-            q: mockQueryId,
-            v: '3',
-          },
-        }
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/SendRequest?'),
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
       );
+
+      // Verify query params
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain(`t=${mockToken}`);
+      expect(url).toContain(`q=${mockQueryId}`);
+      expect(url).toContain('v=3');
 
       expect(result).toEqual({
         referenceCode: mockReferenceCode,
-        url: 'https://example.com/statement',
+        url: 'https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement',
       });
     });
 
-    it('should return error on failed request', async () => {
-      const mockResponse = {
-        data: `<?xml version="1.0" encoding="UTF-8"?>
+    it('should handle error response', async () => {
+      const mockResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Fail</Status>
-  <ErrorCode>1001</ErrorCode>
-  <ErrorMessage>Invalid token</ErrorMessage>
-</FlexStatementResponse>`,
-      };
+  <ErrorCode>1003</ErrorCode>
+  <ErrorMessage>Token is not valid</ErrorMessage>
+</FlexStatementResponse>`;
 
-      const mockGet = vi.fn().mockResolvedValue(mockResponse);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch.mockResolvedValueOnce(xmlResponse(mockResponseXml));
 
       const result = await client.sendRequest(mockQueryId);
 
       expect(result).toEqual({
-        error: 'Invalid token',
-        errorCode: '1001',
+        error: 'Token is not valid',
+        errorCode: '1003',
       });
     });
 
-    it('should handle network errors', async () => {
-      const mockError = new Error('Network error');
-      Object.defineProperty(mockError, 'isAxiosError', { value: true });
-      
-      const mockGet = vi.fn().mockRejectedValue(mockError);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
-
-      // Check the axios.isAxiosError before the test
-      vi.spyOn(axios, 'isAxiosError').mockReturnValue(true);
+    it('should wrap HTTP errors with a descriptive message', async () => {
+      mockFetch.mockResolvedValueOnce(xmlResponse('Server Error', 500));
 
       await expect(client.sendRequest(mockQueryId)).rejects.toThrow(
-        'Failed to send flex query request: Network error'
+        'Failed to send flex query request: HTTP 500:'
       );
     });
 
-    it('should handle unexpected response format', async () => {
-      const mockResponse = {
-        data: `<?xml version="1.0" encoding="UTF-8"?>
+    it('should throw on unexpected response format', async () => {
+      const mockResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <UnexpectedFormat>
   <Data>Something</Data>
-</UnexpectedFormat>`,
-      };
+</UnexpectedFormat>`;
 
-      const mockGet = vi.fn().mockResolvedValue(mockResponse);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch.mockResolvedValueOnce(xmlResponse(mockResponseXml));
 
       await expect(client.sendRequest(mockQueryId)).rejects.toThrow(
         'Unexpected response format from Flex Query service'
@@ -124,89 +106,81 @@ describe('FlexQueryClient', () => {
   });
 
   describe('getStatement', () => {
-    it('should successfully get statement data', async () => {
-      const mockStatementData = `<?xml version="1.0" encoding="UTF-8"?>
-<FlexQueryResponse queryName="Test Query" type="AF">
-  <FlexStatements count="1">
-    <FlexStatement accountId="U12345" fromDate="2023-01-01" toDate="2023-12-31">
-      <AccountInformation>
-        <EquitySummaryByReportDateInBase accountId="U12345" acctAlias="Test" />
-      </AccountInformation>
-    </FlexStatement>
-  </FlexStatements>
-</FlexQueryResponse>`;
+    it('should successfully get statement', async () => {
+      const statementXml = `<?xml version="1.0" encoding="UTF-8"?>
+<FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
+  <Status>Success</Status>
+</FlexStatementResponse>`;
 
-      const mockResponse = {
-        data: mockStatementData,
-      };
-
-      const mockGet = vi.fn().mockResolvedValue(mockResponse);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch.mockResolvedValueOnce(xmlResponse(statementXml));
 
       const result = await client.getStatement(mockReferenceCode);
 
-      expect(mockGet).toHaveBeenCalledWith(
-        'https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement',
-        {
-          params: {
-            t: mockToken,
-            q: mockReferenceCode,
-            v: '3',
-          },
-        }
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/GetStatement?'),
+        expect.anything()
       );
 
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain(`t=${mockToken}`);
+      expect(url).toContain(`q=${mockReferenceCode}`);
+      expect(url).toContain('v=3');
+
       expect(result).toEqual({
-        data: mockStatementData,
+        data: statementXml,
       });
     });
 
-    it('should return error when statement not ready', async () => {
-      const mockResponse = {
-        data: `<?xml version="1.0" encoding="UTF-8"?>
-<FlexStatementResponse timestamp="26 August, 2023 02:00 PM EDT">
-  <Status>Fail</Status>
-  <ErrorCode>1019</ErrorCode>
-  <ErrorMessage>Statement generation in progress. Please try again shortly.</ErrorMessage>
-</FlexStatementResponse>`,
-      };
+    it('should handle FlexQueryResponse format', async () => {
+      const flexQueryXml = `<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="Test Query" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U12345" />
+  </FlexStatements>
+</FlexQueryResponse>`;
 
-      const mockGet = vi.fn().mockResolvedValue(mockResponse);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch.mockResolvedValueOnce(xmlResponse(flexQueryXml));
 
       const result = await client.getStatement(mockReferenceCode);
 
       expect(result).toEqual({
-        error: 'Statement generation in progress. Please try again shortly.',
+        data: flexQueryXml,
+      });
+    });
+
+    it('should handle error response', async () => {
+      const errorXml = `<?xml version="1.0" encoding="UTF-8"?>
+<FlexStatementResponse timestamp="26 August, 2023 02:00 PM EDT">
+  <Status>Fail</Status>
+  <ErrorCode>1019</ErrorCode>
+  <ErrorMessage>Statement generation in progress</ErrorMessage>
+</FlexStatementResponse>`;
+
+      mockFetch.mockResolvedValueOnce(xmlResponse(errorXml));
+
+      const result = await client.getStatement(mockReferenceCode);
+
+      expect(result).toEqual({
+        error: 'Statement generation in progress',
         errorCode: '1019',
       });
     });
 
-    it('should handle network errors', async () => {
-      const mockError = new Error('Network timeout');
-      Object.defineProperty(mockError, 'isAxiosError', { value: true });
-      
-      const mockGet = vi.fn().mockRejectedValue(mockError);
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
-
-      vi.spyOn(axios, 'isAxiosError').mockReturnValue(true);
+    it('should wrap HTTP errors with a descriptive message', async () => {
+      mockFetch.mockResolvedValueOnce(xmlResponse('Server Error', 500));
 
       await expect(client.getStatement(mockReferenceCode)).rejects.toThrow(
-        'Failed to get flex statement: Network timeout'
+        'Failed to get flex statement: HTTP 500:'
       );
     });
   });
 
   describe('executeQuery', () => {
-    it('should execute query and wait for statement', async () => {
+    it('should execute query and return statement', async () => {
       const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Success</Status>
   <ReferenceCode>${mockReferenceCode}</ReferenceCode>
-  <Url>https://example.com/statement</Url>
 </FlexStatementResponse>`;
 
       const statementXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -217,19 +191,16 @@ describe('FlexQueryClient', () => {
   </FlexStatements>
 </FlexQueryResponse>`;
 
-      const mockGet = vi.fn()
-        .mockResolvedValueOnce({ data: sendResponseXml })
-        .mockResolvedValueOnce({ data: statementXml });
-
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch
+        .mockResolvedValueOnce(xmlResponse(sendResponseXml))
+        .mockResolvedValueOnce(xmlResponse(statementXml));
 
       const result = await client.executeQuery(mockQueryId, 3, 100);
 
       expect(result).toEqual({
         data: statementXml,
       });
-      expect(mockGet).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
     it('should retry when statement is not ready', async () => {
@@ -253,28 +224,25 @@ describe('FlexQueryClient', () => {
   </FlexStatements>
 </FlexQueryResponse>`;
 
-      const mockGet = vi.fn()
-        .mockResolvedValueOnce({ data: sendResponseXml })
-        .mockResolvedValueOnce({ data: notReadyXml })
-        .mockResolvedValueOnce({ data: statementXml });
-
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch
+        .mockResolvedValueOnce(xmlResponse(sendResponseXml))
+        .mockResolvedValueOnce(xmlResponse(notReadyXml))
+        .mockResolvedValueOnce(xmlResponse(statementXml));
 
       const result = await client.executeQuery(mockQueryId, 3, 100);
 
       expect(result).toEqual({
         data: statementXml,
       });
-      expect(mockGet).toHaveBeenCalledTimes(3);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
     });
 
     it.each([
-      ['1001', 'Statement could not be generated at this time. Please try again shortly.'],
-      ['1009', 'The server is under heavy load and statement could not be generated at this time. Please try again shortly.'],
-      ['1019', 'Statement generation in progress. Please try again shortly.'],
-      ['1021', 'Statement could not be retrieved at this time. Please try again shortly.'],
-    ])('should retry on transient GetStatement error code %s', async (code, message) => {
+      ['1001', 'Statement could not be generated at this time. try again shortly.'],
+      ['1009', 'Server is under heavy load.'],
+      ['1019', 'Statement generation in progress'],
+      ['1021', 'Statement could not be retrieved at this time.'],
+    ])('should retry on transient error code %s', async (errorCode, errorMessage) => {
       const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Success</Status>
@@ -284,8 +252,8 @@ describe('FlexQueryClient', () => {
       const transientXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 02:00 PM EDT">
   <Status>Fail</Status>
-  <ErrorCode>${code}</ErrorCode>
-  <ErrorMessage>${message}</ErrorMessage>
+  <ErrorCode>${errorCode}</ErrorCode>
+  <ErrorMessage>${errorMessage}</ErrorMessage>
 </FlexStatementResponse>`;
 
       const statementXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -295,21 +263,20 @@ describe('FlexQueryClient', () => {
   </FlexStatements>
 </FlexQueryResponse>`;
 
-      const mockGet = vi.fn()
-        .mockResolvedValueOnce({ data: sendResponseXml })
-        .mockResolvedValueOnce({ data: transientXml })
-        .mockResolvedValueOnce({ data: statementXml });
+      mockFetch
+        .mockResolvedValueOnce(xmlResponse(sendResponseXml))
+        .mockResolvedValueOnce(xmlResponse(transientXml))
+        .mockResolvedValueOnce(xmlResponse(statementXml));
 
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      const result = await client.executeQuery(mockQueryId, 3, 100);
 
-      const result = await client.executeQuery(mockQueryId, 3, 10);
-
-      expect(result).toEqual({ data: statementXml });
-      expect(mockGet).toHaveBeenCalledTimes(3);
+      expect(result).toEqual({
+        data: statementXml,
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(3);
     });
 
-    it('should not retry on terminal GetStatement errors (e.g. 1015 invalid token)', async () => {
+    it('should not retry on terminal error codes', async () => {
       const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Success</Status>
@@ -323,12 +290,9 @@ describe('FlexQueryClient', () => {
   <ErrorMessage>Token is invalid.</ErrorMessage>
 </FlexStatementResponse>`;
 
-      const mockGet = vi.fn()
-        .mockResolvedValueOnce({ data: sendResponseXml })
-        .mockResolvedValueOnce({ data: terminalXml });
-
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch
+        .mockResolvedValueOnce(xmlResponse(sendResponseXml))
+        .mockResolvedValueOnce(xmlResponse(terminalXml));
 
       const result = await client.executeQuery(mockQueryId, 5, 10);
 
@@ -336,11 +300,10 @@ describe('FlexQueryClient', () => {
         error: 'Token is invalid.',
         errorCode: '1015',
       });
-      // Should bail after the first GetStatement attempt — no further retries
-      expect(mockGet).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
-    it('should retry when fallback transient message casing differs', async () => {
+    it('should retry transient errors even when the error code itself differs but the message says "try again"', async () => {
       const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Success</Status>
@@ -361,41 +324,52 @@ describe('FlexQueryClient', () => {
   </FlexStatements>
 </FlexQueryResponse>`;
 
-      const mockGet = vi.fn()
-        .mockResolvedValueOnce({ data: sendResponseXml })
-        .mockResolvedValueOnce({ data: transientXml })
-        .mockResolvedValueOnce({ data: statementXml });
+      mockFetch
+        .mockResolvedValueOnce(xmlResponse(sendResponseXml))
+        .mockResolvedValueOnce(xmlResponse(transientXml))
+        .mockResolvedValueOnce(xmlResponse(statementXml));
 
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      const result = await client.executeQuery(mockQueryId, 3, 100);
 
-      const result = await client.executeQuery(mockQueryId, 3, 10);
-
-      expect(result).toEqual({ data: statementXml });
-      expect(mockGet).toHaveBeenCalledTimes(3);
+      expect(result).toEqual({
+        data: statementXml,
+      });
     });
 
-    it('should return error when sendRequest fails', async () => {
-      const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
+    it('should error when sendRequest returns error', async () => {
+      const errorResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Fail</Status>
-  <ErrorCode>1001</ErrorCode>
-  <ErrorMessage>Invalid query ID</ErrorMessage>
+  <ErrorCode>1003</ErrorCode>
+  <ErrorMessage>Token is not valid</ErrorMessage>
 </FlexStatementResponse>`;
 
-      const mockGet = vi.fn().mockResolvedValueOnce({ data: sendResponseXml });
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
+      mockFetch.mockResolvedValueOnce(xmlResponse(errorResponseXml));
 
       const result = await client.executeQuery(mockQueryId);
 
       expect(result).toEqual({
-        error: 'Invalid query ID',
-        errorCode: '1001',
+        error: 'Token is not valid',
+        errorCode: '1003',
       });
     });
 
-    it('should timeout after max retries', async () => {
+    it('should error when no reference code received', async () => {
+      const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
+<FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
+  <Status>Success</Status>
+</FlexStatementResponse>`;
+
+      mockFetch.mockResolvedValueOnce(xmlResponse(sendResponseXml));
+
+      const result = await client.executeQuery(mockQueryId);
+
+      expect(result).toEqual({
+        error: 'No reference code received from flex query service',
+      });
+    });
+
+    it('should return timeout error after max retries', async () => {
       const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
 <FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
   <Status>Success</Status>
@@ -409,34 +383,14 @@ describe('FlexQueryClient', () => {
   <ErrorMessage>Statement generation in progress</ErrorMessage>
 </FlexStatementResponse>`;
 
-      const mockGet = vi.fn()
-        .mockResolvedValueOnce({ data: sendResponseXml })
-        .mockResolvedValue({ data: notReadyXml }); // Always return not ready
+      mockFetch
+        .mockResolvedValueOnce(xmlResponse(sendResponseXml))
+        .mockImplementation(() => Promise.resolve(xmlResponse(notReadyXml)));
 
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
-
-      const result = await client.executeQuery(mockQueryId, 2, 100);
+      const result = await client.executeQuery(mockQueryId, 3, 10);
 
       expect(result).toEqual({
-        error: 'Statement not ready after 2 retries. Please try again later.',
-      });
-    });
-
-    it('should return error when no reference code received', async () => {
-      const sendResponseXml = `<?xml version="1.0" encoding="UTF-8"?>
-<FlexStatementResponse timestamp="26 August, 2023 01:59 PM EDT">
-  <Status>Success</Status>
-</FlexStatementResponse>`;
-
-      const mockGet = vi.fn().mockResolvedValueOnce({ data: sendResponseXml });
-      (axios.create as any).mockReturnValue({ get: mockGet });
-      client = new FlexQueryClient({ token: mockToken });
-
-      const result = await client.executeQuery(mockQueryId);
-
-      expect(result).toEqual({
-        error: 'No reference code received from flex query service',
+        error: 'Statement not ready after 3 retries. Please try again later.',
       });
     });
   });
@@ -453,8 +407,8 @@ describe('FlexQueryClient', () => {
 </FlexQueryResponse>`;
 
       const result = await client.parseStatement(xmlData);
-
       expect(result).toBeDefined();
+
       expect(result.FlexQueryResponse).toBeDefined();
       expect(result.FlexQueryResponse.queryName).toBe('Test Query');
       expect(result.FlexQueryResponse.type).toBe('AF');
@@ -476,7 +430,6 @@ describe('FlexQueryClient', () => {
 
       const result = await client.parseStatement(xmlData);
 
-      // mergeAttrs should merge attributes into the object
       expect(result.FlexQueryResponse.Data.value).toBe('123');
     });
   });

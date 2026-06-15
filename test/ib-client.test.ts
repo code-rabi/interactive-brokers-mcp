@@ -1,6 +1,5 @@
 // test/ib-client.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import axios from 'axios';
 import { IBClient, SymbolNotFoundError } from '../src/ib-client.js';
 
 const { mockSpawn, mockFs } = vi.hoisted(() => ({
@@ -14,14 +13,30 @@ const { mockSpawn, mockFs } = vi.hoisted(() => ({
   },
 }));
 
-// Mock axios
-vi.mock('axios');
 vi.mock('child_process', () => ({
   spawn: mockSpawn,
 }));
 vi.mock('fs', () => ({
   default: mockFs,
 }));
+
+const mockFetch = vi.fn();
+
+function mockResponse(data: any, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    statusText: status >= 200 && status < 300 ? 'OK' : `Error ${status}`,
+  });
+}
+
+function findCall(pattern: string): [string, any] | undefined {
+  return mockFetch.mock.calls.find(([url]: [string]) => url.includes(pattern));
+}
+
+function findCallBody(pattern: string): any {
+  const call = findCall(pattern);
+  return call?.[1]?.body ? JSON.parse(call[1].body) : undefined;
+}
 
 describe('IBClient', () => {
   let client: IBClient;
@@ -32,6 +47,8 @@ describe('IBClient', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', mockFetch);
+    mockFetch.mockResolvedValue(mockResponse({}));
     mockFs.existsSync.mockImplementation((target: unknown) =>
       String(target).endsWith('scripts/tickler.js')
     );
@@ -39,94 +56,53 @@ describe('IBClient', () => {
       pid: 12345,
       unref: vi.fn(),
     });
-    
-    // Mock axios.create to return a mock instance
-    const mockAxiosInstance = {
-      get: vi.fn(),
-      post: vi.fn(),
-      defaults: {
-        headers: {
-          common: {},
-        },
-      },
-      interceptors: {
-        request: { use: vi.fn() },
-        response: { use: vi.fn() },
-      },
-    };
-    
-    vi.mocked(axios.create).mockReturnValue(mockAxiosInstance as any);
-    
+
     client = new IBClient({ ...mockConfig });
   });
 
   afterEach(() => {
-    // Clean up any intervals
     if (client) {
       client.destroy();
     }
+    vi.unstubAllGlobals();
   });
 
   describe('Constructor and Initialization', () => {
     it('should create IBClient with correct config', () => {
       expect(client).toBeDefined();
-      expect(axios.create).toHaveBeenCalled();
     });
 
     it('should initialize with HTTPS base URL', () => {
-      expect(axios.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          baseURL: 'https://localhost:5000/v1/api',
-        })
-      );
-    });
-
-    it('should set up request and response interceptors', () => {
-      const createCall = vi.mocked(axios.create).mock.results[0].value;
-      expect(createCall.interceptors.request.use).toHaveBeenCalled();
-      expect(createCall.interceptors.response.use).toHaveBeenCalled();
+      expect((client as any).baseUrl).toBe('https://localhost:5000/v1/api');
     });
   });
 
   describe('Session Management', () => {
     it('should start tickle after successful authentication check', async () => {
-      const mockAuthClient = {
-        get: vi.fn().mockResolvedValue({
-          data: { authenticated: true },
-        }),
-      };
-      
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
+      mockFetch.mockResolvedValueOnce(mockResponse({ authenticated: true }));
+
       const result = await client.checkAuthenticationStatus();
-      
+
       expect(result).toBe(true);
-      expect(mockAuthClient.get).toHaveBeenCalledWith('/iserver/auth/status');
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/iserver/auth/status'),
+        expect.objectContaining({ method: 'GET' })
+      );
     });
 
     it('should stop tickle when authentication fails', async () => {
-      const mockAuthClient = {
-        get: vi.fn().mockResolvedValue({
-          data: { authenticated: false },
-        }),
-      };
-      
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
+      mockFetch.mockResolvedValueOnce(mockResponse({ authenticated: false }));
+
       const result = await client.checkAuthenticationStatus();
-      
+
       expect(result).toBe(false);
     });
 
     it('should handle authentication check errors gracefully', async () => {
-      const mockAuthClient = {
-        get: vi.fn().mockRejectedValue(new Error('Network error')),
-      };
-      
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
       const result = await client.checkAuthenticationStatus();
-      
+
       expect(result).toBe(false);
     });
 
@@ -218,35 +194,36 @@ describe('IBClient', () => {
 
   describe('Port Updates', () => {
     it('should update port and reinitialize client', () => {
-      const initialCreateCalls = vi.mocked(axios.create).mock.calls.length;
-      
       client.updatePort(5001);
-      
-      // Should call axios.create again for reinitialization
-      expect(vi.mocked(axios.create).mock.calls.length).toBeGreaterThan(initialCreateCalls);
+
+      expect((client as any).baseUrl).toBe('https://localhost:5001/v1/api');
     });
 
     it.skip('should not reinitialize if port is the same', () => {
       // Skip this test - edge case not critical for functionality
-      // The implementation correctly checks if port is different before reinitializing
     });
   });
 
   describe('API Methods', () => {
+    beforeEach(() => {
+      (client as any).isAuthenticated = true;
+    });
+
     describe('getAccountInfo', () => {
       it('should fetch account information', async () => {
         const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
         const mockSummary = { totalCashValue: 10000 };
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        
-        // Mock accounts response
-        mockClient.get.mockResolvedValueOnce({ data: mockAccounts });
-        // Mock summary response for each account
-        mockClient.get.mockResolvedValueOnce({ data: mockSummary });
-        
+
+        mockFetch
+          .mockResolvedValueOnce(mockResponse(mockAccounts))
+          .mockResolvedValueOnce(mockResponse(mockSummary));
+
         const result = await client.getAccountInfo();
-        
-        expect(mockClient.get).toHaveBeenCalledWith('/portfolio/accounts');
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/portfolio/accounts'),
+          expect.objectContaining({ method: 'GET' })
+        );
         expect(result.accounts).toEqual(mockAccounts);
         expect(result.summaries).toHaveLength(1);
       });
@@ -255,98 +232,76 @@ describe('IBClient', () => {
     describe('getPositions', () => {
       it('should fetch positions for account', async () => {
         const mockPositions = [{ symbol: 'AAPL', position: 10 }];
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        
-        mockClient.get.mockResolvedValueOnce({ data: mockPositions });
-        
+
+        mockFetch.mockResolvedValueOnce(mockResponse(mockPositions));
+
         const result = await client.getPositions('U12345');
-        
-        expect(mockClient.get).toHaveBeenCalledWith('/portfolio/U12345/positions');
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/portfolio/U12345/positions'),
+          expect.objectContaining({ method: 'GET' })
+        );
         expect(result).toEqual(mockPositions);
       });
     });
 
     describe('getMarketData', () => {
       it('should fetch market data for symbol', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        
-        // Mock search response
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        
-        // Mock market data response
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, price: 150.25 }],
-        });
-        
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, price: 150.25 }]));
+
         const result = await client.getMarketData('AAPL');
-        
-        expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('/iserver/secdef/search?symbol=AAPL')
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/iserver/secdef/search?symbol=AAPL'),
+          expect.objectContaining({ method: 'GET' })
         );
         expect(result).toBeDefined();
       });
 
       it('should throw error if symbol not found', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
+        mockFetch.mockResolvedValueOnce(mockResponse([]));
 
-        // Mock empty search response
-        mockClient.get.mockResolvedValueOnce({ data: [] });
-
-        // The specific "Symbol ... not found" message should reach the caller
-        // (not be swallowed by the generic "Failed to retrieve market data" catch)
         await expect(client.getMarketData('INVALID')).rejects.toThrow(
           'Symbol INVALID not found'
         );
       });
 
       it('should propagate SymbolNotFoundError instance to callers', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({ data: [] });
+        mockFetch.mockResolvedValueOnce(mockResponse([]));
 
         await expect(client.getMarketData('INVALID')).rejects.toBeInstanceOf(SymbolNotFoundError);
       });
 
       it('should include exchange in secdef/search URL when provided', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, price: 150.25 }],
-        });
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, price: 150.25 }]));
 
         await client.getMarketData('AAPL', 'NASDAQ');
 
-        expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ')
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ'),
+          expect.objectContaining({ method: 'GET' })
         );
       });
 
       it('should URL-encode the exchange parameter', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, price: 150.25 }],
-        });
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, price: 150.25 }]));
 
         await client.getMarketData('AAPL', 'NYSE ARCA');
 
-        expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('&name=NYSE%20ARCA')
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('&name=NYSE%20ARCA'),
+          expect.anything()
         );
       });
 
       it('should mention the exchange in the not-found error when provided', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({ data: [] });
+        mockFetch.mockResolvedValueOnce(mockResponse([]));
 
         await expect(client.getMarketData('INVALID', 'NASDAQ')).rejects.toThrow(
           'Symbol INVALID on NASDAQ not found'
@@ -356,18 +311,10 @@ describe('IBClient', () => {
 
     describe('placeOrder', () => {
       it('should place market order successfully', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        
-        // Mock search response
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        
-        // Mock order response
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123', status: 'Submitted' }],
-        });
-        
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123', status: 'Submitted' }]));
+
         const orderRequest = {
           accountId: 'U12345',
           symbol: 'AAPL',
@@ -375,68 +322,43 @@ describe('IBClient', () => {
           orderType: 'MKT' as const,
           quantity: 10,
         };
-        
+
         const result = await client.placeOrder(orderRequest);
-        
-        expect(mockClient.post).toHaveBeenCalledWith(
-          '/iserver/account/U12345/orders',
-          expect.objectContaining({
-            orders: expect.arrayContaining([
-              expect.objectContaining({
-                conid: 265598,
-                orderType: 'MKT',
-                side: 'BUY',
-                quantity: 10,
-              }),
-            ]),
-          })
-        );
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual(expect.objectContaining({
+          conid: 265598,
+          orderType: 'MKT',
+          side: 'BUY',
+          quantity: 10,
+        }));
         expect(result).toBeDefined();
       });
 
       it('should include price for limit orders', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123' }],
-        });
-        
-        const orderRequest = {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
+
+        await client.placeOrder({
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY' as const,
           orderType: 'LMT' as const,
           quantity: 10,
           price: 150.50,
-        };
-        
-        await client.placeOrder(orderRequest);
-        
-        expect(mockClient.post).toHaveBeenCalledWith(
-          expect.any(String),
-          expect.objectContaining({
-            orders: expect.arrayContaining([
-              expect.objectContaining({
-                price: 150.50,
-              }),
-            ]),
-          })
-        );
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual(expect.objectContaining({
+          price: 150.50,
+        }));
       });
 
       it('should default tif to DAY when not specified', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123' }],
-        });
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
           accountId: 'U12345',
@@ -446,25 +368,14 @@ describe('IBClient', () => {
           quantity: 10,
         });
 
-        expect(mockClient.post).toHaveBeenCalledWith(
-          expect.any(String),
-          expect.objectContaining({
-            orders: expect.arrayContaining([
-              expect.objectContaining({ tif: 'DAY' }),
-            ]),
-          })
-        );
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual(expect.objectContaining({ tif: 'DAY' }));
       });
 
       it('should use the user-provided tif when given', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123' }],
-        });
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
           accountId: 'U12345',
@@ -475,25 +386,14 @@ describe('IBClient', () => {
           tif: 'GTC',
         });
 
-        expect(mockClient.post).toHaveBeenCalledWith(
-          expect.any(String),
-          expect.objectContaining({
-            orders: expect.arrayContaining([
-              expect.objectContaining({ tif: 'GTC' }),
-            ]),
-          })
-        );
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual(expect.objectContaining({ tif: 'GTC' }));
       });
 
       it('should include exchange in secdef/search URL when provided', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123' }],
-        });
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
           accountId: 'U12345',
@@ -504,20 +404,16 @@ describe('IBClient', () => {
           exchange: 'NASDAQ',
         });
 
-        expect(mockClient.get).toHaveBeenCalledWith(
-          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ')
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ'),
+          expect.anything()
         );
       });
 
       it('should include exchange in the order payload when specified', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123' }],
-        });
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
           accountId: 'U12345',
@@ -528,21 +424,12 @@ describe('IBClient', () => {
           exchange: 'NASDAQ',
         });
 
-        expect(mockClient.post).toHaveBeenCalledWith(
-          expect.any(String),
-          expect.objectContaining({
-            orders: expect.arrayContaining([
-              expect.objectContaining({ exchange: 'NASDAQ' }),
-            ]),
-          })
-        );
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual(expect.objectContaining({ exchange: 'NASDAQ' }));
       });
 
       it('should propagate SymbolNotFoundError when symbol cannot be resolved', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-
-        // Mock empty search response — no matching symbol
-        mockClient.get.mockResolvedValueOnce({ data: [] });
+        mockFetch.mockResolvedValueOnce(mockResponse([]));
 
         await expect(
           client.placeOrder({
@@ -556,56 +443,41 @@ describe('IBClient', () => {
       });
 
       it('should include stopPrice for stop orders', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        
-        mockClient.get.mockResolvedValueOnce({
-          data: [{ conid: 265598, symbol: 'AAPL' }],
-        });
-        
-        mockClient.post.mockResolvedValueOnce({
-          data: [{ id: 'order-123' }],
-        });
-        
-        const orderRequest = {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
+
+        await client.placeOrder({
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'SELL' as const,
           orderType: 'STP' as const,
           quantity: 10,
           stopPrice: 140.00,
-        };
-        
-        await client.placeOrder(orderRequest);
-        
-        expect(mockClient.post).toHaveBeenCalledWith(
-          expect.any(String),
-          expect.objectContaining({
-            orders: expect.arrayContaining([
-              expect.objectContaining({
-                auxPrice: 140.00,
-              }),
-            ]),
-          })
-        );
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual(expect.objectContaining({
+          auxPrice: 140.00,
+        }));
       });
     });
 
     describe('getOrders', () => {
       it('should fetch orders for all discovered trading accounts', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
         const firstAccountOrders = [{ orderId: '123', status: 'Filled' }];
         const secondAccountOrders = [{ orderId: '456', status: 'Submitted' }];
-        
-        mockClient.get
-          .mockResolvedValueOnce({ data: { accounts: ['U12345', { accountId: 'U67890' }], selectedAccount: 'U12345' } })
-          .mockResolvedValueOnce({ data: { orders: firstAccountOrders } })
-          .mockResolvedValueOnce({ data: { orders: secondAccountOrders } });
-        
+
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({ accounts: ['U12345', { accountId: 'U67890' }], selectedAccount: 'U12345' }))
+          .mockResolvedValueOnce(mockResponse({ orders: firstAccountOrders }))
+          .mockResolvedValueOnce(mockResponse({ orders: secondAccountOrders }));
+
         const result = await client.getOrders();
-        
-        expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/accounts');
-        expect(mockClient.get).toHaveBeenNthCalledWith(2, '/iserver/account/orders', { params: { accountId: 'U12345' } });
-        expect(mockClient.get).toHaveBeenNthCalledWith(3, '/iserver/account/orders', { params: { accountId: 'U67890' } });
+
+        expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining('/iserver/accounts'), expect.objectContaining({ method: 'GET' }));
+        expect(mockFetch).toHaveBeenNthCalledWith(2, expect.stringContaining('/iserver/account/orders?accountId=U12345'), expect.objectContaining({ method: 'GET' }));
+        expect(mockFetch).toHaveBeenNthCalledWith(3, expect.stringContaining('/iserver/account/orders?accountId=U67890'), expect.objectContaining({ method: 'GET' }));
         expect(result.orders).toEqual([...firstAccountOrders, ...secondAccountOrders]);
         expect(result.accountResults).toEqual([
           { accountId: 'U12345', data: { orders: firstAccountOrders } },
@@ -614,133 +486,166 @@ describe('IBClient', () => {
       });
 
       it('should fall back to portfolio accounts when iserver account discovery fails', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
         const mockOrders = [{ orderId: '123', status: 'Filled' }];
-        
-        mockClient.get
+
+        mockFetch
           .mockRejectedValueOnce(new Error('iserver accounts unavailable'))
-          .mockResolvedValueOnce({ data: [{ id: 'U12345' }] })
-          .mockResolvedValueOnce({ data: { orders: mockOrders } });
-        
+          .mockResolvedValueOnce(mockResponse([{ id: 'U12345' }]))
+          .mockResolvedValueOnce(mockResponse({ orders: mockOrders }));
+
         const result = await client.getOrders();
-        
-        expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/accounts');
-        expect(mockClient.get).toHaveBeenNthCalledWith(2, '/portfolio/accounts');
-        expect(mockClient.get).toHaveBeenNthCalledWith(3, '/iserver/account/orders', { params: { accountId: 'U12345' } });
+
+        expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining('/iserver/accounts'), expect.anything());
+        expect(mockFetch).toHaveBeenNthCalledWith(2, expect.stringContaining('/portfolio/accounts'), expect.anything());
+        expect(mockFetch).toHaveBeenNthCalledWith(3, expect.stringContaining('/iserver/account/orders?accountId=U12345'), expect.anything());
         expect(result.orders).toEqual(mockOrders);
       });
 
       it('should fall back to an unscoped orders request when account discovery returns no accounts', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
         const mockOrders = [{ orderId: '123', status: 'Filled' }];
-        
-        mockClient.get
-          .mockResolvedValueOnce({ data: { accounts: [] } })
-          .mockResolvedValueOnce({ data: [] })
-          .mockResolvedValueOnce({ data: mockOrders });
-        
+
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({ accounts: [] }))
+          .mockResolvedValueOnce(mockResponse([]))
+          .mockResolvedValueOnce(mockResponse(mockOrders));
+
         const result = await client.getOrders();
-        
-        expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/accounts');
-        expect(mockClient.get).toHaveBeenNthCalledWith(2, '/portfolio/accounts');
-        expect(mockClient.get).toHaveBeenNthCalledWith(3, '/iserver/account/orders', { params: {} });
+
+        expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringContaining('/iserver/accounts'), expect.anything());
+        expect(mockFetch).toHaveBeenNthCalledWith(2, expect.stringContaining('/portfolio/accounts'), expect.anything());
+        expect(mockFetch).toHaveBeenNthCalledWith(3, expect.stringContaining('/iserver/account/orders'), expect.objectContaining({ method: 'GET' }));
+        // Unscoped: no accountId query parameter
+        expect(mockFetch.mock.calls[2][0]).not.toContain('accountId');
         expect(result).toEqual(mockOrders);
       });
 
       it('should fetch orders for specific account', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
         const mockOrders = [{ orderId: '123', status: 'Filled' }];
-        
-        mockClient.get.mockResolvedValueOnce({ data: mockOrders });
-        
+
+        mockFetch.mockResolvedValueOnce(mockResponse(mockOrders));
+
         const result = await client.getOrders('U12345');
-        
-        expect(mockClient.get).toHaveBeenCalledWith('/iserver/account/orders', { params: { accountId: 'U12345' } });
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/iserver/account/orders?accountId=U12345'),
+          expect.objectContaining({ method: 'GET' })
+        );
         expect(result).toEqual(mockOrders);
       });
     });
 
     describe('getOrderStatus', () => {
       it('should fetch order status by ID', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
         const mockOrderStatus = { orderId: '123', status: 'Filled' };
-        
-        mockClient.get.mockResolvedValueOnce({ data: mockOrderStatus });
-        
+
+        mockFetch.mockResolvedValueOnce(mockResponse(mockOrderStatus));
+
         const result = await client.getOrderStatus('123');
-        
-        expect(mockClient.get).toHaveBeenCalledWith('/iserver/account/orders/123');
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/iserver/account/orders/123'),
+          expect.objectContaining({ method: 'GET' })
+        );
         expect(result).toEqual(mockOrderStatus);
       });
     });
 
     describe('confirmOrder', () => {
       it('should confirm order with reply', async () => {
-        const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        const mockResponse = { confirmed: true };
-        
-        mockClient.post.mockResolvedValueOnce({ data: mockResponse });
-        
+        const mockResult = { confirmed: true };
+
+        mockFetch.mockResolvedValueOnce(mockResponse(mockResult));
+
         const result = await client.confirmOrder('reply-123', ['msg1', 'msg2']);
-        
-        expect(mockClient.post).toHaveBeenCalledWith(
-          '/iserver/reply/reply-123',
-          { confirmed: true, messageIds: ['msg1', 'msg2'] }
-        );
-        expect(result).toEqual(mockResponse);
+
+        const call = findCall('/iserver/reply/reply-123');
+        expect(call).toBeDefined();
+        expect(call![1].method).toBe('POST');
+        const body = JSON.parse(call![1].body);
+        expect(body).toEqual({ confirmed: true, messageIds: ['msg1', 'msg2'] });
+        expect(result).toEqual(mockResult);
       });
     });
   });
 
   describe('reauthenticate', () => {
-    it('should initialize brokerage session using the official ssodh/init form body', async () => {
-      const mockAuthClient = {
-        post: vi.fn().mockResolvedValue({ data: {} }),
-        get: vi.fn()
-          .mockResolvedValueOnce({ data: { RESULT: true } })
-          .mockResolvedValueOnce({
-            data: {
-              authenticated: false,
-              connected: true,
-              MAC: '06:7F:1D:C4:36:2F',
-              hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
-            },
-          })
-          .mockRejectedValueOnce(new Error('not ready'))
-          .mockResolvedValueOnce({
-            data: { authenticated: true, connected: true, established: true },
-          }),
+    // Helper to set up mock sequence for initializeBrokerageSession
+    // The brokerage init sequence (no cookies, single pass) makes these fetch calls:
+    // 1. GET /sso/validate
+    // 2. GET /iserver/auth/status
+    // 3. GET /iserver/accounts
+    // 4. POST /iserver/auth/ssodh/init
+    // 5. POST .../reauthenticate?force=true
+    // 6. POST /iserver/reauthenticate
+    // 7. POST /tickle
+    // 8. GET /tickle
+    // 9. GET /portfolio/accounts
+    // 10. GET /iserver/auth/status (final)
+    function setupBrokerageInitMocks(opts: {
+      authStatus?: any;
+      accountsReject?: boolean;
+      finalStatus?: any;
+    }) {
+      const statusWithMAC = opts.authStatus ?? {
+        authenticated: false,
+        connected: true,
+        MAC: '06:7F:1D:C4:36:2F',
+        hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
       };
-      
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
+      const finalStatus = opts.finalStatus ?? {
+        authenticated: true, connected: true, established: true,
+      };
+
+      const chain = mockFetch
+        .mockResolvedValueOnce(mockResponse({ RESULT: true }))           // 1. GET /sso/validate
+        .mockResolvedValueOnce(mockResponse(statusWithMAC));              // 2. GET /iserver/auth/status
+
+      if (opts.accountsReject !== false) {
+        chain.mockRejectedValueOnce(new Error('not ready'));              // 3. GET /iserver/accounts (fail)
+      } else {
+        chain.mockResolvedValueOnce(mockResponse([]));                    // 3. GET /iserver/accounts
+      }
+
+      chain
+        .mockResolvedValueOnce(mockResponse({}))                          // 4. POST /iserver/auth/ssodh/init
+        .mockResolvedValueOnce(mockResponse({}))                          // 5. POST .../reauthenticate?force=true
+        .mockResolvedValueOnce(mockResponse({}))                          // 6. POST /iserver/reauthenticate
+        .mockResolvedValueOnce(mockResponse({}))                          // 7. POST /tickle
+        .mockResolvedValueOnce(mockResponse({}))                          // 8. GET /tickle
+        .mockResolvedValueOnce(mockResponse({}))                          // 9. GET /portfolio/accounts
+        .mockResolvedValueOnce(mockResponse(finalStatus));                // 10. GET /iserver/auth/status
+    }
+
+    it('should initialize brokerage session using the official ssodh/init form body', async () => {
+      setupBrokerageInitMocks({});
+
       await client.reauthenticate();
-      
-      expect(mockAuthClient.get).toHaveBeenCalledWith('/sso/validate');
-      expect(mockAuthClient.get).toHaveBeenCalledWith('/iserver/auth/status');
-      expect(mockAuthClient.get).toHaveBeenCalledWith('/iserver/accounts');
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.stringContaining('compete=true'),
-        expect.objectContaining({
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        })
+
+      // Verify ssodh/init call (4th call, index 3)
+      const ssodInitCall = findCall('/iserver/auth/ssodh/init');
+      expect(ssodInitCall).toBeDefined();
+      expect(ssodInitCall![1].method).toBe('POST');
+      expect(ssodInitCall![1].body).toContain('compete=true');
+      expect(ssodInitCall![1].body).toContain('mac=06-7F-1D-C4-36-2F');
+      expect(ssodInitCall![1].body).toContain('machineId=71a482fc');
+      expect(ssodInitCall![1].headers).toEqual(expect.objectContaining({
+        'Content-Type': 'application/x-www-form-urlencoded',
+      }));
+
+      // Verify other key calls happened
+      expect(findCall('/sso/validate')).toBeDefined();
+      expect(findCall('/iserver/auth/status')).toBeDefined();
+      expect(findCall('/iserver/accounts')).toBeDefined();
+      expect(findCall('/v1/portal/iserver/reauthenticate')).toBeDefined();
+
+      const reauthCall = findCall('/iserver/reauthenticate');
+      expect(reauthCall).toBeDefined();
+      expect(reauthCall![1].method).toBe('POST');
+
+      const tickleCall = mockFetch.mock.calls.find(
+        ([url, init]: [string, any]) => url.includes('/tickle') && init?.method === 'POST' && !url.includes('portal')
       );
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.stringContaining('mac=06-7F-1D-C4-36-2F'),
-        expect.any(Object)
-      );
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.stringContaining('machineId=71a482fc'),
-        expect.any(Object)
-      );
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        'https://localhost:5000/v1/portal/iserver/reauthenticate?force=true'
-      );
-      expect(mockAuthClient.post).toHaveBeenCalledWith('/iserver/reauthenticate');
-      expect(mockAuthClient.post).toHaveBeenCalledWith('/tickle');
+      expect(tickleCall).toBeDefined();
     });
 
     it('should initialize brokerage session using SSO HARDWARE_INFO when auth status omits hardware_info', async () => {
@@ -795,80 +700,37 @@ describe('IBClient', () => {
     });
 
     it('should handle reauth when final status returns false', async () => {
-      const mockAuthClient = {
-        post: vi.fn().mockResolvedValue({ data: {} }),
-        get: vi.fn()
-          .mockResolvedValueOnce({ data: { RESULT: true } })
-          .mockResolvedValueOnce({
-            data: {
-              authenticated: false,
-              connected: true,
-              MAC: '06:7F:1D:C4:36:2F',
-              hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
-            },
-          })
-          .mockRejectedValueOnce(new Error('not ready'))
-          .mockResolvedValueOnce({ data: { authenticated: false, connected: true } }),
-      };
+      setupBrokerageInitMocks({
+        finalStatus: { authenticated: false, connected: true },
+      });
 
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-
-      // Should not throw — handled internally
       await expect(client.reauthenticate()).resolves.not.toThrow();
-      expect(mockAuthClient.post).toHaveBeenCalledWith(
-        '/iserver/auth/ssodh/init',
-        expect.any(String),
-        expect.any(Object)
-      );
+
+      expect(findCall('/iserver/auth/ssodh/init')).toBeDefined();
     });
 
     it('should handle network errors gracefully', async () => {
-      const mockAuthClient = {
-        post: vi.fn(),
-        get: vi.fn().mockRejectedValue(new Error('Connection refused')),
-      };
+      mockFetch.mockRejectedValue(new Error('Connection refused'));
 
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-
-      // Should not throw — errors are caught internally
       await expect(client.reauthenticate()).resolves.not.toThrow();
     });
 
     it('should stop tickle when reauth status returns false', async () => {
       vi.useFakeTimers();
       try {
-        // Step 1: bring tickle up by simulating a successful auth status check.
-        const checkClient = {
-          get: vi.fn().mockResolvedValue({ data: { authenticated: true } }),
-        };
-        vi.mocked(axios.create).mockReturnValueOnce(checkClient as any);
+        // Phase 1: authenticate successfully to start tickle
+        mockFetch.mockResolvedValueOnce(mockResponse({ authenticated: true }));
         await client.checkAuthenticationStatus();
 
-        const tickleClient = {
-          post: vi.fn().mockResolvedValue({ data: {} }),
-        };
-        const reauthClient = {
-          post: vi.fn().mockResolvedValue({ data: {} }),
-          get: vi.fn()
-            .mockResolvedValueOnce({ data: { RESULT: true } })
-            .mockResolvedValueOnce({
-              data: {
-                authenticated: false,
-                connected: true,
-                MAC: '06:7F:1D:C4:36:2F',
-                hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
-              },
-            })
-            .mockRejectedValueOnce(new Error('not ready'))
-            .mockResolvedValueOnce({ data: { authenticated: false, connected: true } }),
-        };
-        vi.mocked(axios.create).mockReturnValueOnce(reauthClient as any);
-        vi.mocked(axios.create).mockReturnValue(tickleClient as any);
-
+        // Phase 2: reauthenticate returns false → stops tickle
+        setupBrokerageInitMocks({
+          finalStatus: { authenticated: false, connected: true },
+        });
         await client.reauthenticate();
 
+        const callCountAfterReauth = mockFetch.mock.calls.length;
         await vi.advanceTimersByTimeAsync(120_000);
-        expect(tickleClient.post).not.toHaveBeenCalled();
+        expect(mockFetch.mock.calls.length).toBe(callCountAfterReauth);
       } finally {
         vi.useRealTimers();
       }
@@ -877,27 +739,18 @@ describe('IBClient', () => {
     it('should stop tickle when reauth throws', async () => {
       vi.useFakeTimers();
       try {
-        // Bring tickle up first.
-        const checkClient = {
-          get: vi.fn().mockResolvedValue({ data: { authenticated: true } }),
-        };
-        vi.mocked(axios.create).mockReturnValueOnce(checkClient as any);
+        // Phase 1: authenticate successfully to start tickle
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({ authenticated: true }))
+          // Phase 2: all subsequent calls fail
+          .mockRejectedValue(new Error('Connection refused'));
         await client.checkAuthenticationStatus();
-
-        const tickleClient = {
-          post: vi.fn().mockResolvedValue({ data: {} }),
-        };
-        const reauthClient = {
-          post: vi.fn(),
-          get: vi.fn().mockRejectedValue(new Error('Connection refused')),
-        };
-        vi.mocked(axios.create).mockReturnValueOnce(reauthClient as any);
-        vi.mocked(axios.create).mockReturnValue(tickleClient as any);
 
         await client.reauthenticate();
 
+        const callCountAfterReauth = mockFetch.mock.calls.length;
         await vi.advanceTimersByTimeAsync(120_000);
-        expect(tickleClient.post).not.toHaveBeenCalled();
+        expect(mockFetch.mock.calls.length).toBe(callCountAfterReauth);
       } finally {
         vi.useRealTimers();
       }
@@ -905,23 +758,12 @@ describe('IBClient', () => {
   });
 
   describe('Cleanup', () => {
-    it('should stop tickle on destroy', () => {
-      // Start with authenticated state to trigger tickle
-      const mockAuthClient = {
-        get: vi.fn().mockResolvedValue({
-          data: { authenticated: true },
-        }),
-      };
-      
-      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
-      // This should start tickle
-      client.checkAuthenticationStatus();
-      
-      // Destroy should stop it
+    it('should stop tickle on destroy', async () => {
+      mockFetch.mockResolvedValueOnce(mockResponse({ authenticated: true }));
+
+      await client.checkAuthenticationStatus();
+
       client.destroy();
-      
-      // No way to directly test if interval is cleared, but at least verify destroy works
       expect(() => client.destroy()).not.toThrow();
     });
   });

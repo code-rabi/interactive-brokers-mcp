@@ -1,6 +1,6 @@
-import axios, { AxiosInstance } from "axios";
 import { Logger } from "./logger.js";
 import { parseStringPromise } from "xml2js";
+import { HttpError, isHttpError } from "./http.js";
 
 interface FlexQueryClientConfig {
   token: string;
@@ -39,16 +39,31 @@ export class FlexQueryClient {
     "1021", // Statement could not be retrieved at this time
   ]);
 
-  private client: AxiosInstance;
   private token: string;
   // Fixed: gdcdyn → ndcdyn, /Universal/servlet → /AccountManagement/FlexWebService
   private baseUrl = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService";
 
   constructor(config: FlexQueryClientConfig) {
     this.token = config.token;
-    this.client = axios.create({
-      timeout: 60000, // Flex queries can take a while
+  }
+
+  private async get(url: string, params: Record<string, string>): Promise<{ data: string }> {
+    const fullUrl = new URL(url);
+    for (const [key, value] of Object.entries(params)) {
+      fullUrl.searchParams.set(key, value);
+    }
+    const response = await fetch(fullUrl.toString(), {
+      signal: AbortSignal.timeout(60000),
     });
+    const data = await response.text();
+    if (!response.ok) {
+      throw new HttpError(
+        `HTTP ${response.status}: ${response.statusText}`,
+        { status: response.status, statusText: response.statusText, data },
+        { url: fullUrl.toString(), method: "GET" },
+      );
+    }
+    return { data };
   }
 
   /**
@@ -59,7 +74,7 @@ export class FlexQueryClient {
   async sendRequest(queryId: string): Promise<FlexQueryResponse> {
     try {
       Logger.log(`[FLEX-QUERY] Sending request for query ID: ${queryId}`);
-      
+
       const url = `${this.baseUrl}/SendRequest`;
       const params = {
         t: this.token,
@@ -67,16 +82,16 @@ export class FlexQueryClient {
         v: "3", // API version
       };
 
-      const response = await this.client.get(url, { params });
-      
+      const response = await this.get(url, params);
+
       Logger.log(`[FLEX-QUERY] SendRequest response:`, response.data);
 
       // Parse XML response
       const parsed = await parseStringPromise(response.data, { explicitArray: false });
-      
+
       if (parsed.FlexStatementResponse) {
         const flexResponse = parsed.FlexStatementResponse;
-        
+
         if (flexResponse.Status === "Success") {
           return {
             referenceCode: flexResponse.ReferenceCode,
@@ -93,11 +108,11 @@ export class FlexQueryClient {
       throw new Error("Unexpected response format from Flex Query service");
     } catch (error) {
       Logger.error("[FLEX-QUERY] Failed to send request:", error);
-      
-      if (axios.isAxiosError(error)) {
+
+      if (isHttpError(error)) {
         throw new Error(`Failed to send flex query request: ${error.message}`);
       }
-      
+
       throw error;
     }
   }
@@ -110,7 +125,7 @@ export class FlexQueryClient {
   async getStatement(referenceCode: string): Promise<FlexStatementResponse> {
     try {
       Logger.log(`[FLEX-QUERY] Getting statement for reference code: ${referenceCode}`);
-      
+
       const url = `${this.baseUrl}/GetStatement`;
       const params = {
         t: this.token,
@@ -118,14 +133,14 @@ export class FlexQueryClient {
         v: "3", // API version
       };
 
-      const response = await this.client.get(url, { params });
-      
+      const response = await this.get(url, params);
+
       // Parse XML response
       const parsed = await parseStringPromise(response.data, { explicitArray: false });
-      
+
       if (parsed.FlexStatementResponse) {
         const flexResponse = parsed.FlexStatementResponse;
-        
+
         if (flexResponse.Status === "Success") {
           // The actual statement data is in the response
           return {
@@ -147,11 +162,11 @@ export class FlexQueryClient {
       throw new Error("Unexpected response format from Flex Query service");
     } catch (error) {
       Logger.error("[FLEX-QUERY] Failed to get statement:", error);
-      
-      if (axios.isAxiosError(error)) {
+
+      if (isHttpError(error)) {
         throw new Error(`Failed to get flex statement: ${error.message}`);
       }
-      
+
       throw error;
     }
   }
@@ -170,7 +185,7 @@ export class FlexQueryClient {
   ): Promise<FlexStatementResponse> {
     // Step 1: Send the request
     const sendResponse = await this.sendRequest(queryId);
-    
+
     if (sendResponse.error) {
       return {
         error: sendResponse.error,
@@ -191,11 +206,11 @@ export class FlexQueryClient {
     for (let i = 0; i < maxRetries; i++) {
       // Wait before checking
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-      
+
       Logger.log(`[FLEX-QUERY] Attempt ${i + 1}/${maxRetries} to retrieve statement...`);
-      
+
       const statementResponse = await this.getStatement(sendResponse.referenceCode);
-      
+
       if (statementResponse.error) {
         const code = statementResponse.errorCode ?? "";
         const normalizedError = statementResponse.error.toLowerCase();
@@ -233,7 +248,7 @@ export class FlexQueryClient {
    */
   async parseStatement(xmlData: string): Promise<any> {
     try {
-      const parsed = await parseStringPromise(xmlData, { 
+      const parsed = await parseStringPromise(xmlData, {
         explicitArray: false,
         mergeAttrs: true,
       });
@@ -244,5 +259,3 @@ export class FlexQueryClient {
     }
   }
 }
-
-
