@@ -4,7 +4,7 @@
     "src/scripts/tickler.ts",
     "test/**/*.test.ts"
   ],
-  "ignore": ["ib-gateway/**", "dist/**"],
+  "ignore": ["ib-gateway/**"],
   "ignoreDependencies": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/github",

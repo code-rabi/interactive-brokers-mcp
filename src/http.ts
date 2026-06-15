@@ -6,7 +6,7 @@ declare global {
   }
 }
 
-export interface HttpClientConfig {
+interface HttpClientConfig {
   baseUrl?: string;
   timeout?: number;
   dispatcher?: Dispatcher;

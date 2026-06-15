@@ -78,7 +78,7 @@ interface OrderRequest {
   tif?: "DAY" | "GTC" | "IOC" | "OPG";
 }
 
-export class AuthenticationError extends Error {
+class AuthenticationError extends Error {
   readonly isAuthError = true;
   constructor(message: string) {
     super(message);

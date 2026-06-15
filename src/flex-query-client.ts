@@ -14,14 +14,14 @@ interface FlexStatementStatusResponse {
   ErrorCode?: string;
 }
 
-export interface FlexQueryResponse {
+interface FlexQueryResponse {
   referenceCode?: string;
   url?: string;
   error?: string;
   errorCode?: string;
 }
 
-export interface FlexStatementResponse {
+interface FlexStatementResponse {
   data?: string;
   error?: string;
   errorCode?: string;
@@ -226,5 +226,3 @@ export class FlexQueryClient {
     }
   }
 }
-
-export default FlexQueryClient;

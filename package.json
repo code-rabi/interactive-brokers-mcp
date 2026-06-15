@@ -31,7 +31,7 @@
     "clean": "rm -rf dist",
     "lint": "oxlint src/ --config=./.oxlintrc.json",
     "lint:fix": "oxlint src/ --config=./.oxlintrc.json --fix",
-    "audit": "npm audit",
+    "audit": "npm audit --omit=dev",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
