@@ -14,21 +14,14 @@ serverOptions:
   maxWorkerExecuteTime: 100
   internalBlockingPoolSize: 20
 cors:
-  origin.allowed: "*"
+  origin.allowed: ""
   allowCredentials: false
 webApps:
   - name: "demo"
     index: "index.html"
 ips:
   allow:
-    - 192.*
-    - 131.216.*
     - 127.0.0.1
-    - host.docker.internal
-    - 172.17.0.*
-    - 172.18.0.*
-    - 172.19.0.*
-    - 172.20.0.*
-    - 10.0.0.*
+    - ::1
   deny:
     - 212.90.324.10

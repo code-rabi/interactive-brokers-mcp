@@ -9,7 +9,7 @@ try {
   console.log(`🚀 Starting Interactive Brokers MCP Server in HTTP/SSE mode on port ${PORT}`);
 
   const app = express();
-  app.use(cors());
+  app.use(cors({ origin: false }));
   app.use(express.json());
 
   // Store active SSE transports
@@ -78,11 +78,12 @@ try {
   });
 
   // Start the server
-  const server = app.listen(PORT, () => {
-    console.log(`✅ HTTP/SSE server listening on http://localhost:${PORT}`);
-    console.log(`📡 SSE endpoint: http://localhost:${PORT}/mcp`);
-    console.log(`📨 Messages endpoint: http://localhost:${PORT}/mcp/messages`);
-    console.log(`🏥 Health check: http://localhost:${PORT}/health`);
+  const HOST = process.env.HOST || process.env.MCP_HOST || "127.0.0.1";
+  const server = app.listen(PORT as number, HOST, () => {
+    console.log(`✅ HTTP/SSE server listening on http://${HOST}:${PORT}`);
+    console.log(`📡 SSE endpoint: http://${HOST}:${PORT}/mcp`);
+    console.log(`📨 Messages endpoint: http://${HOST}:${PORT}/mcp/messages`);
+    console.log(`🏥 Health check: http://${HOST}:${PORT}/health`);
   });
 
   // Handle server errors
