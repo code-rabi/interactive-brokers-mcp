@@ -31,7 +31,7 @@ jobs:
       
       - name: Install Playwright Chromium (E2E only)
         if: ${{ secrets.IB_USERNAME != '' && secrets.IB_PASSWORD != '' }}
-        run: npx playwright install chromium
+        run: npx playwright-core install chromium
 
       - name: Run tests
         run: npm test
