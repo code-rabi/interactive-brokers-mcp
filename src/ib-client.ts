@@ -2,16 +2,63 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import axios, { AxiosInstance, AxiosRequestConfig } from "axios";
-import https from "https";
+import { Agent } from "undici";
 import { Logger } from "./logger.js";
+import {
+  HttpClient,
+  HttpError,
+  type HttpResponse,
+  type RequestOptions,
+} from "./http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-interface ExtendedAxiosRequestConfig extends AxiosRequestConfig {
-  metadata?: { requestId: string };
+// ---------------------------------------------------------------------------
+// IB Gateway response shapes — only the fields we actually access
+// ---------------------------------------------------------------------------
+
+interface AuthStatusResponse {
+  authenticated?: boolean;
+  connected?: boolean;
+  established?: boolean;
+  MAC?: string;
+  hardware_info?: string;
 }
+
+interface TickleResponse {
+  iserver?: { authStatus?: AuthStatusResponse };
+}
+
+interface ContractSearch {
+  conid: number;
+  symbol: string;
+}
+
+interface OrderConfirmation {
+  id?: string;
+  message?: string[];
+  messageIds?: string[];
+}
+
+interface OrderPayload {
+  conid: number;
+  orderType: string;
+  side: string;
+  quantity: number;
+  tif: string;
+  exchange?: string;
+  price?: number;
+  auxPrice?: number;
+}
+
+interface AccountEntry {
+  id?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Config & public types
+// ---------------------------------------------------------------------------
 
 interface IBClientConfig {
   host: string;
@@ -31,15 +78,14 @@ interface OrderRequest {
   tif?: "DAY" | "GTC" | "IOC" | "OPG";
 }
 
-const isError = (error: unknown): error is Error => {
-  return error instanceof Error;
-};
+class AuthenticationError extends Error {
+  readonly isAuthError = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthenticationError";
+  }
+}
 
-/**
- * Thrown when a symbol (optionally scoped to an exchange) cannot be resolved
- * via `secdef/search`. Distinct error class so callers receive the specific
- * "Symbol ... not found" message instead of a swallowed generic one.
- */
 export class SymbolNotFoundError extends Error {
   constructor(message: string) {
     super(message);
@@ -47,15 +93,19 @@ export class SymbolNotFoundError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
 export class IBClient {
-  private client!: AxiosInstance;
   private baseUrl!: string;
+  private client!: HttpClient;
   private config: IBClientConfig;
   private isAuthenticated = false;
   private authAttempts = 0;
   private maxAuthAttempts = 3;
   private tickleInterval?: NodeJS.Timeout;
-  private tickleIntervalMs = 30000; // 30 seconds (well within 1/sec rate limit)
+  private tickleIntervalMs = 30000;
   private sessionCookieHeader?: string;
   private runtimeDir = path.join(__dirname, "../ib-gateway/.runtime");
   private ticklerJsonPath = path.join(this.runtimeDir, "tickler-session.json");
@@ -67,182 +117,136 @@ export class IBClient {
   }
 
   private initializeClient(): void {
-    // Use HTTPS as IB Gateway expects it
     this.baseUrl = `https://${this.config.host}:${this.config.port}/v1/api`;
-    this.client = axios.create({
-      baseURL: this.baseUrl,
+    this.client = new HttpClient({
+      baseUrl: this.baseUrl,
       timeout: 30000,
-      // Allow self-signed certificates
-      httpsAgent: new https.Agent({
-        rejectUnauthorized: false,
-      }),
+      dispatcher: new Agent({ connect: { rejectUnauthorized: false } }),
+    });
+    if (this.sessionCookieHeader) {
+      this.client.setHeader("Cookie", this.sessionCookieHeader);
+    }
+  }
+
+  // Authenticated request with logging (replaces axios interceptors)
+  private async request<T = unknown>(
+    method: string,
+    urlPath: string,
+    options?: RequestOptions,
+  ): Promise<HttpResponse<T>> {
+    const requestId = Math.random().toString(36).substr(2, 9);
+    Logger.log(`[REQUEST-${requestId}] ${method} ${urlPath}`, {
+      timeout: options?.timeout ?? 30000,
+      headers: options?.headers,
+      data: options?.body,
     });
 
-    // Add request interceptor to ensure authentication and log requests
-    this.client.interceptors.request.use(async (config) => {
-      const requestId = Math.random().toString(36).substr(2, 9);
-      Logger.log(`[REQUEST-${requestId}] ${config.method?.toUpperCase()} ${config.url}`, {
-        baseURL: config.baseURL,
-        timeout: config.timeout,
-        headers: config.headers,
-        data: config.data
+    if (!this.isAuthenticated) {
+      Logger.log(`[REQUEST-${requestId}] Not authenticated, authenticating... (attempt ${this.authAttempts + 1}/${this.maxAuthAttempts})`);
+      if (this.authAttempts >= this.maxAuthAttempts) {
+        throw new Error(`Max authentication attempts (${this.maxAuthAttempts}) exceeded`);
+      }
+      await this.authenticate();
+    }
+
+    try {
+      const result = await this.client.request<T>(method, urlPath, options);
+      Logger.log(`[RESPONSE-${requestId}] ${result.status} ${result.statusText}`, {
+        url: urlPath,
+        responseSize: JSON.stringify(result.data).length,
+        dataPreview: JSON.stringify(result.data).substring(0, 500) + "...",
       });
-      
-      if (!this.isAuthenticated) {
-        Logger.log(`[REQUEST-${requestId}] Not authenticated, authenticating... (attempt ${this.authAttempts + 1}/${this.maxAuthAttempts})`);
-        if (this.authAttempts >= this.maxAuthAttempts) {
-          throw new Error(`Max authentication attempts (${this.maxAuthAttempts}) exceeded`);
-        }
-        await this.authenticate();
-      }
-      
-      // Store requestId for response logging
-      (config as ExtendedAxiosRequestConfig).metadata = { requestId };
-      return config;
-    });
-
-    // Add response interceptor for logging
-    this.client.interceptors.response.use(
-      (response) => {
-        const requestId = (response.config as ExtendedAxiosRequestConfig).metadata?.requestId || 'unknown';
-        Logger.log(`[RESPONSE-${requestId}] ${response.status} ${response.statusText}`, {
-          url: response.config.url,
-          responseSize: JSON.stringify(response.data).length,
-          headers: response.headers,
-          dataPreview: JSON.stringify(response.data).substring(0, 500) + '...'
-        });
-        return response;
-      },
-      (error) => {
-        const requestId = (error.config as ExtendedAxiosRequestConfig)?.metadata?.requestId || 'unknown';
-          Logger.error(`[ERROR-${requestId}] Request failed:`, {
-          url: error.config?.url,
-          status: error.response?.status,
-          statusText: error.response?.statusText,
+      return result;
+    } catch (error: unknown) {
+      if (error instanceof HttpError) {
+        Logger.error(`[ERROR-${requestId}] Request failed:`, {
+          url: urlPath,
+          status: error.response.status,
+          statusText: error.response.statusText,
           message: error.message,
-          responseData: error.response?.data
+          responseData: error.response.data,
         });
-        return Promise.reject(error);
+      } else {
+        Logger.error(`[ERROR-${requestId}] Request failed:`, error instanceof Error ? error.message : String(error));
       }
-    );
+      throw error;
+    }
   }
 
   setSessionCookies(cookies: Array<{ name?: string; value?: string; domain?: string }>): void {
     const gatewayCookieNames = new Set(["SBID", "device.info", "TABID", "XYZAB_AM.LOGIN", "XYZAB"]);
     const localhostCookies = (cookies || []).filter((cookie) => {
-      if (!cookie?.name || !cookie?.value) {
-        return false;
-      }
-
+      if (!cookie?.name || !cookie?.value) return false;
       const domain = String(cookie.domain || "").toLowerCase();
-      // Match the browser cookies Gateway itself sets on localhost. Forwarding
-      // unrelated redirect/login cookies can prevent brokerage-session init from
-      // reaching established=true on some Client Portal Gateway builds.
       const localDomain = !domain || domain === "localhost" || domain === "127.0.0.1" || domain.endsWith(".localhost");
       return localDomain && gatewayCookieNames.has(cookie.name);
     });
 
-    const header = localhostCookies
-      .map((cookie) => `${cookie.name}=${cookie.value}`)
-      .join("; ");
-
+    const header = localhostCookies.map((c) => `${c.name}=${c.value}`).join("; ");
     this.sessionCookieHeader = header || undefined;
-    if (this.client) {
-      if (this.sessionCookieHeader) {
-        this.client.defaults.headers.common.Cookie = this.sessionCookieHeader;
-      } else {
-        delete this.client.defaults.headers.common.Cookie;
-      }
+
+    if (this.sessionCookieHeader) {
+      this.client.setHeader("Cookie", this.sessionCookieHeader);
+    } else {
+      this.client.removeHeader("Cookie");
     }
 
     Logger.log(`[AUTH] Captured ${localhostCookies.length}/${(cookies || []).length} localhost browser cookies for REST API calls`);
   }
 
-  private createRawClient(timeout = 30000): AxiosInstance {
-    return axios.create({
-      baseURL: this.baseUrl,
-      timeout,
-      httpsAgent: new https.Agent({
-        rejectUnauthorized: false,
-      }),
-      headers: this.sessionCookieHeader ? { Cookie: this.sessionCookieHeader } : undefined,
-    });
-  }
-
-  private isStatusAuthenticated(status: any): boolean {
-    if (!status || typeof status !== "object") {
-      return false;
-    }
-
-    // Newer Gateway responses can distinguish authenticated browser login from
-    // an established brokerage session. Treat established=true as authoritative;
-    // otherwise preserve compatibility with older responses that omit it.
-    if (status.established === true) {
-      return true;
-    }
-
-    return status.authenticated === true && status.connected !== false;
+  private isStatusAuthenticated(status: unknown): boolean {
+    if (!status || typeof status !== "object") return false;
+    const s = status as AuthStatusResponse;
+    if (s.established === true) return true;
+    return s.authenticated === true && s.connected !== false;
   }
 
   updatePort(newPort: number): void {
     if (this.config.port !== newPort) {
       Logger.log(`[CLIENT] Updating port from ${this.config.port} to ${newPort}`);
-      this.stopTickle(); // Stop tickle for old session
+      this.stopTickle();
       this.config.port = newPort;
-      this.isAuthenticated = false; // Force re-authentication with new port
-      this.authAttempts = 0; // Reset auth attempts
-      this.initializeClient(); // Re-initialize client with new port
+      this.isAuthenticated = false;
+      this.authAttempts = 0;
+      this.initializeClient();
     }
   }
 
-  /**
-   * Check authentication status with IB Gateway without triggering automatic authentication
-   */
   async checkAuthenticationStatus(): Promise<boolean> {
     try {
       Logger.log("[AUTH-CHECK] Checking authentication status...");
-      
-      // Create a new axios instance without interceptors to avoid triggering authentication
-      const authClient = this.createRawClient();
-      
-      const response = await authClient.get("/iserver/auth/status");
+      const response = await this.client.request<AuthStatusResponse>("GET", "/iserver/auth/status");
       Logger.log("[AUTH-CHECK] Auth status response:", response.data);
-      
+
       const authenticated = this.isStatusAuthenticated(response.data);
       this.isAuthenticated = authenticated;
-      
+
       if (authenticated) {
-        this.authAttempts = 0; // Reset auth attempts on successful check
-        this.startTickle(); // Start session maintenance
+        this.authAttempts = 0;
+        this.startTickle();
       } else {
-        this.stopTickle(); // Stop tickle if not authenticated
+        this.stopTickle();
       }
-      
       return authenticated;
-    } catch (error) {
+    } catch {
       this.isAuthenticated = false;
       this.stopTickle();
       return false;
     }
   }
 
-  /**
-   * Send a tickle request to maintain the session
-   * Rate limit: 1 request per second (we use 30 second intervals to be safe)
-   */
   private async tickle(): Promise<void> {
     try {
-      const tickleClient = this.createRawClient(10000);
-
-      const response = await tickleClient.post("/tickle").catch(async (error) => {
-        // Some Client Portal Gateway builds/documentation expose /tickle as GET,
-        // while OAuth examples use POST. Retry GET only when the method appears
-        // unsupported to avoid masking real authentication/network failures.
-        if (error?.response?.status === 404 || error?.response?.status === 405) {
-          return tickleClient.get("/tickle");
+      let response: HttpResponse<TickleResponse>;
+      try {
+        response = await this.client.request<TickleResponse>("POST", "/tickle", { timeout: 10000 });
+      } catch (error: unknown) {
+        if (error instanceof HttpError && (error.response.status === 404 || error.response.status === 405)) {
+          response = await this.client.request<TickleResponse>("GET", "/tickle", { timeout: 10000 });
+        } else {
+          throw error;
         }
-        throw error;
-      });
+      }
 
       const authStatus = response.data?.iserver?.authStatus;
       if (authStatus && !this.isStatusAuthenticated(authStatus)) {
@@ -251,11 +255,9 @@ export class IBClient {
         Logger.warn("[TICKLE] Tickle returned unauthenticated status:", authStatus);
         return;
       }
-
       Logger.log("[TICKLE] Session maintenance ping sent successfully");
     } catch (error) {
       Logger.warn("[TICKLE] Failed to send session maintenance ping:", error);
-      // If tickle fails, check authentication status
       const isAuth = await this.checkAuthenticationStatus();
       if (!isAuth) {
         Logger.warn("[TICKLE] Session expired, stopping tickle interval");
@@ -264,20 +266,10 @@ export class IBClient {
     }
   }
 
-  /**
-   * Start automatic session maintenance
-   */
   private startTickle(): void {
-    if (this.tickleInterval) {
-      return; // Already running
-    }
-    
+    if (this.tickleInterval) return;
     Logger.log(`[TICKLE] Starting automatic session maintenance (interval: ${this.tickleIntervalMs}ms)`);
-    this.tickleInterval = setInterval(() => {
-      this.tickle();
-    }, this.tickleIntervalMs);
-
-    // Spawn Durable Persistent Session Tickler
+    this.tickleInterval = setInterval(() => { this.tickle(); }, this.tickleIntervalMs);
     try {
       this.spawnDurableTickler();
     } catch (error) {
@@ -285,31 +277,22 @@ export class IBClient {
     }
   }
 
-  /**
-   * Spawns a background detached node process running tickler.js to maintain the session
-   */
   private spawnDurableTickler(): void {
-    // Ensure directory exists
     if (!fs.existsSync(this.runtimeDir)) {
       fs.mkdirSync(this.runtimeDir, { recursive: true });
     }
 
-    // Prevent duplicates: Check if we have an existing tickler running
     if (fs.existsSync(this.ticklerJsonPath)) {
       try {
         const data = JSON.parse(fs.readFileSync(this.ticklerJsonPath, "utf8"));
         if (data && typeof data.pid === "number") {
           const isSameTarget = data.host === this.config.host && data.port === this.config.port;
-
           if (this.isProcessRunning(data.pid)) {
             if (isSameTarget) {
               Logger.log(`[TICKLE] Durable tickler already running with PID ${data.pid}`);
               return;
             }
-
-            Logger.log(
-              `[TICKLE] Replacing durable tickler PID ${data.pid} for ${data.host}:${data.port} with ${this.config.host}:${this.config.port}`
-            );
+            Logger.log(`[TICKLE] Replacing durable tickler PID ${data.pid} for ${data.host}:${data.port} with ${this.config.host}:${this.config.port}`);
             if (!this.stopProcess(data.pid)) {
               Logger.warn(`[TICKLE] Existing durable tickler PID ${data.pid} could not be stopped. Skipping respawn.`);
               return;
@@ -317,7 +300,6 @@ export class IBClient {
           } else {
             Logger.log(`[TICKLE] Stale durable tickler file found (PID ${data.pid} not running). Spawning new one.`);
           }
-
           fs.unlinkSync(this.ticklerJsonPath);
         }
       } catch (err) {
@@ -331,38 +313,23 @@ export class IBClient {
     }
 
     Logger.log(`[TICKLE] Spawning detached durable tickler background process for port ${this.config.port}...`);
-
-    // Spawn detached process
     const child = spawn(
       process.execPath,
-      [
-        this.ticklerScriptPath,
-        this.config.host,
-        String(this.config.port),
-      ],
+      [this.ticklerScriptPath, this.config.host, String(this.config.port)],
       {
         detached: true,
         stdio: "ignore",
-        env: {
-          ...process.env,
-          [TICKLER_COOKIE_ENV]: this.sessionCookieHeader || "",
-        }
-      }
+        env: { ...process.env, [TICKLER_COOKIE_ENV]: this.sessionCookieHeader || "" },
+      },
     );
-
     child.unref();
 
     if (child.pid) {
       Logger.log(`[TICKLE] Spawned durable tickler background process successfully (PID: ${child.pid})`);
       fs.writeFileSync(
         this.ticklerJsonPath,
-        JSON.stringify({
-          pid: child.pid,
-          host: this.config.host,
-          port: this.config.port,
-          spawnedAt: new Date().toISOString()
-        }, null, 2),
-        "utf8"
+        JSON.stringify({ pid: child.pid, host: this.config.host, port: this.config.port, spawnedAt: new Date().toISOString() }, null, 2),
+        "utf8",
       );
     } else {
       Logger.error("[TICKLE] Detached tickler spawned but pid is missing.");
@@ -375,12 +342,8 @@ export class IBClient {
       return true;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "EPERM") {
-        return true;
-      }
-      if (code === "ESRCH") {
-        return false;
-      }
+      if (code === "EPERM") return true;
+      if (code === "ESRCH") return false;
       throw error;
     }
   }
@@ -391,19 +354,12 @@ export class IBClient {
       return true;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ESRCH") {
-        return true;
-      }
-      if (code === "EPERM") {
-        return false;
-      }
+      if (code === "ESRCH") return true;
+      if (code === "EPERM") return false;
       throw error;
     }
   }
 
-  /**
-   * Stop automatic session maintenance
-   */
   private stopTickle(): void {
     if (this.tickleInterval) {
       Logger.log("[TICKLE] Stopping automatic session maintenance");
@@ -412,90 +368,60 @@ export class IBClient {
     }
   }
 
-  /**
-   * Cleanup method to stop tickle when client is destroyed
-   */
   public destroy(): void {
     this.stopTickle();
   }
 
-  /**
-   * Initialize/recover the Client Portal Gateway brokerage session.
-   *
-   * A Gateway web login can produce a valid SSO session while `/iserver/auth/status`
-   * remains `authenticated:false`. IBKR's brokerage-session init endpoint requires
-   * an x-www-form-urlencoded body derived from auth/status. An empty POST may return
-   * HTTP 200 but leave the session unauthenticated with:
-   * "Force compete capability must be used together with compete flag".
-   *
-   * Some Gateway builds also require the browser's localhost SSO cookies when
-   * converting web login state into an established brokerage session. Run the
-   * documented sequence once without cookies to prime the Gateway, then repeat it
-   * with the filtered browser-cookie header captured from Playwright.
-   */
+  // ---------------------------------------------------------------------------
+  // Brokerage session initialization
+  // ---------------------------------------------------------------------------
+
   async initializeBrokerageSession(): Promise<boolean> {
-    const cookieClient = this.createRawClient();
-    const noCookieClient = this.sessionCookieHeader
-      ? axios.create({
-          baseURL: this.baseUrl,
-          timeout: 30000,
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-        })
-      : undefined;
+    const hasSessionCookies = Boolean(this.sessionCookieHeader);
+    const sleep = (ms: number) =>
+      hasSessionCookies ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
-    const sleep = (ms: number) => this.sessionCookieHeader
-      ? new Promise((resolve) => setTimeout(resolve, ms))
-      : Promise.resolve();
-
-    const tryRequest = async (label: string, fn: () => Promise<any>) => {
+    const tryRequest = async <T>(label: string, fn: () => Promise<HttpResponse<T>>): Promise<HttpResponse<T> | undefined> => {
       try {
         const response = await fn();
-        if (response?.data?.error) {
-          Logger.warn(`[BROKERAGE-INIT] ${label} returned error body; continuing:`, response.data.error);
-          return response;
+        if (response.data !== null && typeof response.data === "object" && "error" in response.data) {
+          Logger.warn(`[BROKERAGE-INIT] ${label} returned error body; continuing:`, (response.data as Record<string, unknown>).error);
+        } else {
+          Logger.log(`[BROKERAGE-INIT] ${label} returned ${response.status || "ok"}`);
         }
-        Logger.log(`[BROKERAGE-INIT] ${label} returned ${response?.status || "ok"}`);
         return response;
-      } catch (error: any) {
-        Logger.warn(`[BROKERAGE-INIT] ${label} failed or is not ready; continuing:`, error?.message || String(error));
+      } catch (error: unknown) {
+        Logger.warn(`[BROKERAGE-INIT] ${label} failed or is not ready; continuing:`, error instanceof Error ? error.message : String(error));
         return undefined;
       }
     };
 
-    const applyStatus = (status: any): boolean => {
+    const applyStatus = (status: unknown): boolean => {
       const authenticated = this.isStatusAuthenticated(status);
       this.isAuthenticated = authenticated;
-      if (authenticated) {
-        this.authAttempts = 0;
-        this.startTickle();
-      } else {
-        this.stopTickle();
-      }
+      if (authenticated) { this.authAttempts = 0; this.startTickle(); }
+      else { this.stopTickle(); }
       return authenticated;
     };
 
-    const runOfficialSequence = async (client: AxiosInstance, labelPrefix: string, expectFinal = false): Promise<any> => {
+    const runOfficialSequence = async (skipDefaultHeaders: boolean, labelPrefix: string, expectFinal = false): Promise<unknown> => {
       Logger.log(`[BROKERAGE-INIT] Running official Gateway brokerage sequence (${labelPrefix})...`);
+      const opts: RequestOptions = skipDefaultHeaders ? { skipDefaultHeaders: true } : {};
 
-      const ssoValidateResponse = await tryRequest(`${labelPrefix} GET /v1/api/sso/validate`, () => client.get("/sso/validate"));
+      const ssoValidateResponse = await tryRequest(`${labelPrefix} GET /v1/api/sso/validate`,
+        () => this.client.request("GET", "/sso/validate", opts));
       const ssoValidation = ssoValidateResponse?.data || {};
-      let statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
-      if (this.isStatusAuthenticated(statusResponse?.data)) {
-        return statusResponse?.data;
-      }
 
-      // Non-fatal primer: this can return 401 before brokerage init, but it also
-      // nudges Gateway-side server state in some deployments.
-      await tryRequest(`${labelPrefix} GET /v1/api/iserver/accounts`, () => client.get("/iserver/accounts"));
+      let statusResponse = await tryRequest<AuthStatusResponse>(`${labelPrefix} GET /v1/api/iserver/auth/status`,
+        () => this.client.request<AuthStatusResponse>("GET", "/iserver/auth/status", opts));
+      if (this.isStatusAuthenticated(statusResponse?.data)) return statusResponse?.data;
 
-      const authStatus = statusResponse?.data || {};
-      // Some Gateway/SSO combinations report HARDWARE_INFO only from
-      // /sso/validate after mobile 2FA succeeds, while /iserver/auth/status
-      // still omits hardware_info until ssodh/init runs. In that state, using
-      // an empty ssodh/init body can leave authenticated=false indefinitely.
-      // Keep machineId and MAC from the same source when falling back to SSO.
+      await tryRequest(`${labelPrefix} GET /v1/api/iserver/accounts`,
+        () => this.client.request("GET", "/iserver/accounts", opts));
+
+      const authStatus: AuthStatusResponse = (statusResponse?.data as AuthStatusResponse) ?? {};
       const authHardware = String(authStatus.hardware_info || "");
-      const ssoHardware = String(ssoValidation.HARDWARE_INFO || "");
+      const ssoHardware = String((ssoValidation as { HARDWARE_INFO?: string }).HARDWARE_INFO || "");
       const rawHardware = authHardware || ssoHardware;
       const hardwareParts = rawHardware.split("|");
       const machineId = hardwareParts[0] || "";
@@ -505,78 +431,61 @@ export class IBClient {
       const mac = rawMac.replaceAll(":", "-");
 
       if (machineId && mac) {
-        const ssodhBody = new URLSearchParams({
-          compete: "true",
-          locale: "en_US",
-          mac,
-          machineId,
-          username: "-",
-        }).toString();
-
-        await tryRequest(`${labelPrefix} POST /v1/api/iserver/auth/ssodh/init with official form body`, () =>
-          client.post("/iserver/auth/ssodh/init", ssodhBody, {
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          })
-        );
+        const ssodhBody = new URLSearchParams({ compete: "true", locale: "en_US", mac, machineId, username: "-" }).toString();
+        await tryRequest(`${labelPrefix} POST /v1/api/iserver/auth/ssodh/init with official form body`,
+          () => this.client.request("POST", "/iserver/auth/ssodh/init", {
+            ...opts, body: ssodhBody, headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          }));
       } else {
-        await tryRequest(`${labelPrefix} POST /v1/api/iserver/auth/ssodh/init fallback empty body`, () =>
-          client.post("/iserver/auth/ssodh/init")
-        );
+        await tryRequest(`${labelPrefix} POST /v1/api/iserver/auth/ssodh/init fallback empty body`,
+          () => this.client.request("POST", "/iserver/auth/ssodh/init", opts));
       }
 
       await sleep(1000);
       const gatewayBaseUrl = this.baseUrl.replace(/\/v1\/api\/?$/, "");
-      await tryRequest(`${labelPrefix} POST /v1/portal/iserver/reauthenticate?force=true`, () =>
-        client.post(`${gatewayBaseUrl}/v1/portal/iserver/reauthenticate?force=true`)
-      );
+      await tryRequest(`${labelPrefix} POST /v1/portal/iserver/reauthenticate?force=true`,
+        () => this.client.request("POST", `${gatewayBaseUrl}/v1/portal/iserver/reauthenticate?force=true`, opts));
       await sleep(1000);
-      await tryRequest(`${labelPrefix} POST /v1/api/iserver/reauthenticate`, () => client.post("/iserver/reauthenticate"));
+      await tryRequest(`${labelPrefix} POST /v1/api/iserver/reauthenticate`,
+        () => this.client.request("POST", "/iserver/reauthenticate", opts));
       await sleep(1000);
-      await tryRequest(`${labelPrefix} POST /v1/api/tickle`, () => client.post("/tickle"));
-      await tryRequest(`${labelPrefix} GET /v1/api/tickle`, () => client.get("/tickle"));
-      await tryRequest(`${labelPrefix} GET /v1/api/portfolio/accounts`, () => client.get("/portfolio/accounts"));
+      await tryRequest(`${labelPrefix} POST /v1/api/tickle`,
+        () => this.client.request("POST", "/tickle", opts));
+      await tryRequest(`${labelPrefix} GET /v1/api/tickle`,
+        () => this.client.request("GET", "/tickle", opts));
+      await tryRequest(`${labelPrefix} GET /v1/api/portfolio/accounts`,
+        () => this.client.request("GET", "/portfolio/accounts", opts));
 
-      statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
-      let lastStatus: any = statusResponse?.data;
+      statusResponse = await tryRequest<AuthStatusResponse>(`${labelPrefix} GET /v1/api/iserver/auth/status`,
+        () => this.client.request<AuthStatusResponse>("GET", "/iserver/auth/status", opts));
+      let lastStatus: unknown = statusResponse?.data;
       Logger.log(`[BROKERAGE-INIT] Auth status after ${labelPrefix}:`, lastStatus);
-      if (this.isStatusAuthenticated(lastStatus)) {
-        return lastStatus;
-      }
+      if (this.isStatusAuthenticated(lastStatus)) return lastStatus;
 
-      // Only poll for the browser-cookie pass, and only when browser cookies were
-      // actually captured. The no-cookie pass is a primer; waiting there just adds
-      // latency and makes non-browser reauth callers block unnecessarily.
       const shouldPoll = expectFinal && Boolean(this.sessionCookieHeader);
-      if (!shouldPoll) {
-        return lastStatus;
-      }
+      if (!shouldPoll) return lastStatus;
 
       const deadline = Date.now() + 60000;
       while (Date.now() < deadline) {
-        await tryRequest(`${labelPrefix} POST /v1/api/tickle`, () => client.post("/tickle"));
+        await tryRequest(`${labelPrefix} POST /v1/api/tickle`,
+          () => this.client.request("POST", "/tickle", opts));
         await sleep(3000);
-        statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
+        statusResponse = await tryRequest<AuthStatusResponse>(`${labelPrefix} GET /v1/api/iserver/auth/status`,
+          () => this.client.request<AuthStatusResponse>("GET", "/iserver/auth/status", opts));
         lastStatus = statusResponse?.data;
         Logger.log(`[BROKERAGE-INIT] Auth status after ${labelPrefix}:`, lastStatus);
-        if (this.isStatusAuthenticated(lastStatus)) {
-          return lastStatus;
-        }
+        if (this.isStatusAuthenticated(lastStatus)) return lastStatus;
       }
-
       return lastStatus;
     };
 
-    if (noCookieClient) {
-      await runOfficialSequence(noCookieClient, "no-cookie", false);
+    if (hasSessionCookies) {
+      await runOfficialSequence(true, "no-cookie", false);
     }
-    const finalStatus = await runOfficialSequence(cookieClient, noCookieClient ? "browser-cookie" : "default", true);
+    const finalStatus = await runOfficialSequence(false, hasSessionCookies ? "browser-cookie" : "default", true);
     return applyStatus(finalStatus);
   }
 
-  /**
-   * Re-authenticate the REST API session after browser OAuth completes.
-   * This must be called after the browser login creates the server-side session.
-   */
   async reauthenticate(): Promise<void> {
     try {
       const authenticated = await this.initializeBrokerageSession();
@@ -595,525 +504,336 @@ export class IBClient {
   private async authenticate(): Promise<void> {
     Logger.log(`[AUTH] Starting authentication process... (attempt ${this.authAttempts + 1}/${this.maxAuthAttempts})`);
     this.authAttempts++;
-    
     try {
       const authenticated = await this.initializeBrokerageSession();
-      if (authenticated) {
-        Logger.log("[AUTH] Brokerage session authenticated");
-        return;
-      }
-
+      if (authenticated) { Logger.log("[AUTH] Brokerage session authenticated"); return; }
       throw new Error("Gateway is reachable but the IBKR brokerage session is not authenticated yet. Complete browser/2FA login and retry.");
-    } catch (error) {
-      Logger.error(`[AUTH] Authentication failed (attempt ${this.authAttempts}/${this.maxAuthAttempts}):`, isError(error) && error.message, isError(error) && error.stack);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      Logger.error(`[AUTH] Authentication failed (attempt ${this.authAttempts}/${this.maxAuthAttempts}):`, msg, stack);
       this.isAuthenticated = false;
       this.stopTickle();
       if (this.authAttempts >= this.maxAuthAttempts) {
-        throw new Error(`Failed to authenticate with IB Gateway after ${this.maxAuthAttempts} attempts: ${isError(error) ? error.message : String(error)}`);
+        throw new Error(`Failed to authenticate with IB Gateway after ${this.maxAuthAttempts} attempts: ${msg}`);
       }
       throw error;
     }
   }
 
-  async getAccountInfo(): Promise<any> {
+  // ---------------------------------------------------------------------------
+  // API methods
+  // ---------------------------------------------------------------------------
+
+  async getAccountInfo(): Promise<{ accounts: unknown; summaries: Array<{ accountId: string; summary: unknown }> }> {
     Logger.log("[ACCOUNT-INFO] Starting getAccountInfo request...");
     try {
-      Logger.log("[ACCOUNT-INFO] Fetching portfolio accounts...");
-      const accountsResponse = await this.client.get("/portfolio/accounts");
+      const accountsResponse = await this.request<AccountEntry[]>("GET", "/portfolio/accounts");
       const accounts = accountsResponse.data;
       Logger.log(`[ACCOUNT-INFO] Found ${accounts?.length || 0} accounts:`, accounts);
 
-      const result = {
-        accounts: accounts,
-        summaries: [] as any[]
-      };
-
-      Logger.log("[ACCOUNT-INFO] Processing account summaries...");
+      const summaries: Array<{ accountId: string; summary: unknown }> = [];
       for (let i = 0; i < accounts.length; i++) {
         const account = accounts[i];
         Logger.log(`[ACCOUNT-INFO] Processing account ${i + 1}/${accounts.length}: ${account.id}`);
-        
-        const summaryResponse = await this.client.get(
-          `/portfolio/${account.id}/summary`
-        );
-        const summary = summaryResponse.data;
-        Logger.log(`[ACCOUNT-INFO] Account ${account.id} summary:`, summary);
-
-        result.summaries.push({
-          accountId: account.id,
-          summary: summary
-        });
+        const summaryResponse = await this.request("GET", `/portfolio/${account.id}/summary`);
+        Logger.log(`[ACCOUNT-INFO] Account ${account.id} summary:`, summaryResponse.data);
+        summaries.push({ accountId: account.id!, summary: summaryResponse.data });
       }
 
-      Logger.log(`[ACCOUNT-INFO] Completed processing ${result.summaries.length} accounts`);
-      return result;
-    } catch (error) {
+      Logger.log(`[ACCOUNT-INFO] Completed processing ${summaries.length} accounts`);
+      return { accounts, summaries };
+    } catch (error: unknown) {
       Logger.error("[ACCOUNT-INFO] Failed to get account info:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to retrieve account information. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to retrieve account information. Please authenticate with Interactive Brokers first.");
       }
-      
       throw new Error("Failed to retrieve account information");
     }
   }
 
-  async getPositions(accountId?: string): Promise<any> {
+  async getPositions(accountId?: string): Promise<unknown> {
     try {
-      let url = "/portfolio/positions";
-      if (accountId) {
-        url = `/portfolio/${accountId}/positions`;
-      }
-
-      const response = await this.client.get(url);
+      const url = accountId ? `/portfolio/${accountId}/positions` : "/portfolio/positions";
+      const response = await this.request("GET", url);
       return response.data;
-    } catch (error) {
-        Logger.error("Failed to get positions:", error);
-      
-      // Check if this is likely an authentication error
+    } catch (error: unknown) {
+      Logger.error("Failed to get positions:", error);
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to retrieve positions. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to retrieve positions. Please authenticate with Interactive Brokers first.");
       }
-      
       throw new Error("Failed to retrieve positions");
     }
   }
 
-  async getMarketData(symbol: string, exchange?: string): Promise<any> {
+  async getMarketData(symbol: string, exchange?: string): Promise<{ symbol: string; contract: ContractSearch; marketData: unknown }> {
     try {
-      // First, get the contract ID for the symbol, optionally filtered by exchange
       let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
-      if (exchange) {
-        searchUrl += `&name=${encodeURIComponent(exchange)}`;
-      }
-      const searchResponse = await this.client.get(searchUrl);
+      if (exchange) searchUrl += `&name=${encodeURIComponent(exchange)}`;
+      const searchResponse = await this.request<ContractSearch[]>("GET", searchUrl);
 
       if (!searchResponse.data || searchResponse.data.length === 0) {
-        throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? ' on ' + exchange : ''} not found`);
+        throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? " on " + exchange : ""} not found`);
       }
 
       const contract = searchResponse.data[0];
-      const conid = contract.conid;
-
-      // Get market data snapshot
-      // Using corrected field IDs based on IB Client Portal API documentation:
-      // 31=Last Price, 70=Day High, 71=Day Low, 82=Change, 83=Change%, 
-      // 84=Bid, 85=Ask Size, 86=Ask, 87=Volume, 88=Bid Size
-      const response = await this.client.get(
-        `/iserver/marketdata/snapshot?conids=${conid}&fields=31,70,71,82,83,84,85,86,87,88`
+      const response = await this.request("GET",
+        `/iserver/marketdata/snapshot?conids=${contract.conid}&fields=31,70,71,82,83,84,85,86,87,88`,
       );
-
-      return {
-        symbol: symbol,
-        contract: contract,
-        marketData: response.data
-      };
-    } catch (error) {
+      return { symbol, contract, marketData: response.data };
+    } catch (error: unknown) {
       Logger.error("Failed to get market data:", error);
-
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error(`Authentication required to retrieve market data for ${symbol}. Please authenticate with Interactive Brokers first.`);
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError(`Authentication required to retrieve market data for ${symbol}. Please authenticate with Interactive Brokers first.`);
       }
-
-      // Preserve the specific "Symbol ... not found" message for callers
-      if (error instanceof SymbolNotFoundError) {
-        throw error;
-      }
-
+      if (error instanceof SymbolNotFoundError) throw error;
       throw new Error(`Failed to retrieve market data for ${symbol}`);
     }
   }
 
-  private isAuthenticationError(error: any): boolean {
+  private isAuthenticationError(error: unknown): boolean {
     if (!error) return false;
-    
-    const errorMessage = error.message || error.toString();
-    const errorStatus = error.response?.status;
-    const responseData = error.response?.data;
-    
-    // Check for common authentication error patterns
-    return (
-      errorStatus === 401 ||
-      errorStatus === 403 ||
-      errorStatus === 500 ||  // IB Gateway sometimes returns 500 for auth issues
-      errorMessage.includes("authentication") ||
-      errorMessage.includes("authenticate") ||
-      errorMessage.includes("unauthorized") ||
-      errorMessage.includes("not authenticated") ||
-      errorMessage.includes("login") ||
-      responseData?.error?.message?.includes("not authenticated") ||
-      responseData?.error?.message?.includes("authentication") ||
-      // IB Gateway specific patterns
-      responseData?.error === "not authenticated" ||
-      (errorStatus === 500 && responseData?.error?.includes("authentication"))
-    );
+
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes("authentication") ||
+      message.includes("authenticate") ||
+      message.includes("unauthorized") ||
+      message.includes("not authenticated") ||
+      message.includes("login")
+    ) return true;
+
+    if (error instanceof HttpError) {
+      const { status, data } = error.response;
+      if (status === 401 || status === 403 || status === 500) return true;
+      if (typeof data === "object" && data !== null) {
+        const obj = data as Record<string, unknown>;
+        if (obj.error === "not authenticated") return true;
+        if (typeof obj.error === "string" && status === 500 && obj.error.includes("authentication")) return true;
+        if (typeof obj.error === "object" && obj.error !== null) {
+          const nested = (obj.error as Record<string, unknown>).message;
+          if (typeof nested === "string" && (nested.includes("not authenticated") || nested.includes("authentication"))) return true;
+        }
+      }
+    }
+    return false;
   }
 
-  async placeOrder(orderRequest: OrderRequest): Promise<any> {
+  async placeOrder(orderRequest: OrderRequest): Promise<unknown> {
     try {
-      // First, get the contract ID for the symbol, optionally filtered by exchange
       let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
-      if (orderRequest.exchange) {
-        searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
-      }
-      const searchResponse = await this.client.get(searchUrl);
+      if (orderRequest.exchange) searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
+      const searchResponse = await this.request<ContractSearch[]>("GET", searchUrl);
 
       if (!searchResponse.data || searchResponse.data.length === 0) {
-        throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? ' on ' + orderRequest.exchange : ''} not found`);
+        throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? " on " + orderRequest.exchange : ""} not found`);
       }
 
       const contract = searchResponse.data[0];
-      const conid = contract.conid;
-
-      // Prepare order object
-      const order: any = {
-        conid: Number(conid), // Ensure conid is number
+      const order: OrderPayload = {
+        conid: Number(contract.conid),
         orderType: orderRequest.orderType,
         side: orderRequest.action,
-        quantity: Number(orderRequest.quantity), // Ensure quantity is number
-        tif: orderRequest.tif || "DAY", // Time in force - default to DAY to avoid orphaned orders
+        quantity: Number(orderRequest.quantity),
+        tif: orderRequest.tif || "DAY",
       };
+      if (orderRequest.exchange) order.exchange = orderRequest.exchange;
+      if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) order.price = Number(orderRequest.price);
+      if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) order.auxPrice = Number(orderRequest.stopPrice);
 
-      // Include exchange if specified
-      if (orderRequest.exchange) {
-        order.exchange = orderRequest.exchange;
-      }
-
-      // Add price for limit orders
-      if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
-        (order as any).price = Number(orderRequest.price);
-      }
-
-      // Add stop price for stop orders
-      if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) {
-        (order as any).auxPrice = Number(orderRequest.stopPrice);
-      }
-
-      // Place the order
-      const response = await this.client.post(
+      const response = await this.request<OrderConfirmation[]>("POST",
         `/iserver/account/${orderRequest.accountId}/orders`,
-        {
-          orders: [order],
-        }
+        { body: { orders: [order] } },
       );
 
-      // Check if we received confirmation messages that need to be handled
-      if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-        const firstResponse = response.data[0];
-        
-        // Check if this is a confirmation message response
-        if (firstResponse.id && firstResponse.message && firstResponse.messageIds && orderRequest.suppressConfirmations) {
-          Logger.log("Order confirmation received, automatically confirming...", firstResponse);
-          
-          // Automatically confirm all messages
-          const confirmResponse = await this.confirmOrder(firstResponse.id, firstResponse.messageIds);
-          return confirmResponse;
+      if (Array.isArray(response.data) && response.data.length > 0) {
+        const first = response.data[0];
+        if (first.id && first.message && first.messageIds && orderRequest.suppressConfirmations) {
+          Logger.log("Order confirmation received, automatically confirming...", first);
+          return await this.confirmOrder(first.id, first.messageIds);
         }
       }
-
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("Failed to place order:", error);
-
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to place orders. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to place orders. Please authenticate with Interactive Brokers first.");
       }
-
-      // Preserve the specific "Symbol ... not found" message for callers
-      if (error instanceof SymbolNotFoundError) {
-        throw error;
-      }
-
+      if (error instanceof SymbolNotFoundError) throw error;
       throw new Error("Failed to place order");
     }
   }
 
-  /**
-   * Confirm an order by replying to confirmation messages
-   * @param replyId The reply ID from the confirmation response
-   * @param messageIds Array of message IDs to confirm
-   * @returns The confirmation response
-   */
-  async confirmOrder(replyId: string, messageIds: string[]): Promise<any> {
+  async confirmOrder(replyId: string, messageIds: string[]): Promise<unknown> {
     try {
       Logger.log(`Confirming order with reply ID ${replyId} and message IDs:`, messageIds);
-      
-      const response = await this.client.post(`/iserver/reply/${replyId}`, {
-        confirmed: true,
-        messageIds: messageIds
+      const response = await this.request("POST", `/iserver/reply/${replyId}`, {
+        body: { confirmed: true, messageIds },
       });
-
       Logger.log("Order confirmation response:", response.data);
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("Failed to confirm order:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to confirm orders. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to confirm orders. Please authenticate with Interactive Brokers first.");
       }
-      
-      throw new Error("Failed to confirm order: " + (error as any).message);
+      throw new Error("Failed to confirm order: " + (error instanceof Error ? error.message : String(error)));
     }
   }
 
-  async getOrderStatus(orderId: string): Promise<any> {
+  async getOrderStatus(orderId: string): Promise<unknown> {
     try {
-      const response = await this.client.get(`/iserver/account/orders/${orderId}`);
+      const response = await this.request("GET", `/iserver/account/orders/${orderId}`);
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("Failed to get order status:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error(`Authentication required to get order status for order ${orderId}. Please authenticate with Interactive Brokers first.`);
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError(`Authentication required to get order status for order ${orderId}. Please authenticate with Interactive Brokers first.`);
       }
-      
       throw new Error(`Failed to get status for order ${orderId}`);
     }
   }
 
-  private normalizeAccountId(account: any): string | undefined {
-    if (!account) {
-      return undefined;
+  private normalizeAccountId(account: unknown): string | undefined {
+    if (!account) return undefined;
+    if (typeof account === "string") return account.trim() || undefined;
+    if (typeof account === "object" && account !== null) {
+      const obj = account as Record<string, unknown>;
+      const id = obj.id ?? obj.accountId ?? obj.account_id ?? obj.acctId ?? obj.account;
+      return typeof id === "string" && id.trim() ? id.trim() : undefined;
     }
-
-    if (typeof account === "string") {
-      return account.trim() || undefined;
-    }
-
-    const id = account.id ?? account.accountId ?? account.account_id ?? account.acctId ?? account.account;
-    return typeof id === "string" && id.trim() ? id.trim() : undefined;
+    return undefined;
   }
 
-  private extractAccountIds(data: any): string[] {
-    const candidates = [
+  private extractAccountIds(data: unknown): string[] {
+    const obj = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : undefined;
+    const candidates: unknown[] = [
       ...(Array.isArray(data) ? data : []),
-      ...(Array.isArray(data?.accounts) ? data.accounts : []),
-      ...(Array.isArray(data?.accountIds) ? data.accountIds : []),
-      data?.selectedAccount,
-      data?.selected_account,
+      ...(Array.isArray(obj?.accounts) ? (obj.accounts as unknown[]) : []),
+      ...(Array.isArray(obj?.accountIds) ? (obj.accountIds as unknown[]) : []),
+      obj?.selectedAccount,
+      obj?.selected_account,
     ];
-
     return [...new Set(
-      candidates
-        .map((account) => this.normalizeAccountId(account))
-        .filter((accountId): accountId is string => Boolean(accountId))
+      candidates.map((a) => this.normalizeAccountId(a)).filter((id): id is string => Boolean(id)),
     )];
   }
 
-  private extractOrders(data: any): any[] {
-    if (Array.isArray(data)) {
-      return data;
+  private extractOrders(data: unknown): unknown[] {
+    if (Array.isArray(data)) return data;
+    if (typeof data === "object" && data !== null) {
+      const obj = data as Record<string, unknown>;
+      if (Array.isArray(obj.orders)) return obj.orders as unknown[];
     }
-
-    if (Array.isArray(data?.orders)) {
-      return data.orders;
-    }
-
     return [];
   }
 
   private async getOrderAccountIds(): Promise<string[]> {
-    const accountSources = [
-      { label: "/iserver/accounts", fetch: () => this.client.get("/iserver/accounts") },
-      { label: "/portfolio/accounts", fetch: () => this.client.get("/portfolio/accounts") },
+    const sources = [
+      { label: "/iserver/accounts", fetch: () => this.request("GET", "/iserver/accounts") },
+      { label: "/portfolio/accounts", fetch: () => this.request("GET", "/portfolio/accounts") },
     ];
-
-    for (const source of accountSources) {
+    for (const source of sources) {
       try {
         const response = await source.fetch();
-        const accountIds = this.extractAccountIds(response.data);
-        if (accountIds.length > 0) {
-          return accountIds;
-        }
+        const ids = this.extractAccountIds(response.data);
+        if (ids.length > 0) return ids;
       } catch (error) {
         Logger.warn(`[ORDERS] Failed to discover accounts via ${source.label}:`, error);
       }
     }
-
     return [];
   }
 
-  async getOrders(accountId?: string): Promise<any> {
+  async getOrders(accountId?: string): Promise<unknown> {
     try {
       const url = "/iserver/account/orders";
-      
       if (accountId) {
-        const response = await this.client.get(url, { params: { accountId } });
+        const response = await this.request("GET", url, { params: { accountId } });
         return response.data;
       }
 
       const accountIds = await this.getOrderAccountIds();
       if (accountIds.length === 0) {
         Logger.warn("[ORDERS] Could not discover account IDs; falling back to unscoped orders request");
-        const response = await this.client.get(url, { params: {} });
+        const response = await this.request("GET", url);
         return response.data;
       }
 
-      const accountResults = [];
-      const orders: any[] = [];
-
-      for (const discoveredAccountId of accountIds) {
-        const response = await this.client.get(url, { params: { accountId: discoveredAccountId } });
-        accountResults.push({
-          accountId: discoveredAccountId,
-          data: response.data,
-        });
+      const accountResults: Array<{ accountId: string; data: unknown }> = [];
+      const orders: unknown[] = [];
+      for (const id of accountIds) {
+        const response = await this.request("GET", url, { params: { accountId: id } });
+        accountResults.push({ accountId: id, data: response.data });
         orders.push(...this.extractOrders(response.data));
       }
-
-      return {
-        orders,
-        accountResults,
-      };
-    } catch (error) {
+      return { orders, accountResults };
+    } catch (error: unknown) {
       Logger.error("Failed to get orders:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to retrieve orders. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to retrieve orders. Please authenticate with Interactive Brokers first.");
       }
-      
       throw new Error("Failed to retrieve orders");
     }
   }
 
-  /**
-   * Get all alerts for an account
-   * @param accountId The account ID
-   * @returns The list of alerts
-   */
-  async getAlerts(accountId: string): Promise<any> {
+  async getAlerts(accountId: string): Promise<unknown> {
     try {
       Logger.log(`[ALERT] Getting alerts for account ${accountId}`);
-      
-      const response = await this.client.get(
-        `/iserver/account/${accountId}/alerts`
-      );
-
+      const response = await this.request("GET", `/iserver/account/${accountId}/alerts`);
       Logger.log("[ALERT] Get alerts response:", response.data);
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("[ALERT] Failed to get alerts:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to get alerts. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to get alerts. Please authenticate with Interactive Brokers first.");
       }
-      
-      throw new Error("Failed to get alerts: " + (error as any).message);
+      throw new Error("Failed to get alerts: " + (error instanceof Error ? error.message : String(error)));
     }
   }
 
-  /**
-   * Create a new alert for an account
-   * @param accountId The account ID
-   * @param alertRequest The alert configuration
-   * @returns The alert creation response
-   */
-  async createAlert(accountId: string, alertRequest: any): Promise<any> {
+  async createAlert(accountId: string, alertRequest: unknown): Promise<unknown> {
     try {
       Logger.log(`[ALERT] Creating alert for account ${accountId}:`, alertRequest);
-      
-      const response = await this.client.post(
-        `/iserver/account/${accountId}/alert`,
-        alertRequest
-      );
-
+      const response = await this.request("POST", `/iserver/account/${accountId}/alert`, { body: alertRequest });
       Logger.log("[ALERT] Alert creation response:", response.data);
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("[ALERT] Failed to create alert:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to create alerts. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to create alerts. Please authenticate with Interactive Brokers first.");
       }
-      
-      throw new Error("Failed to create alert: " + (error as any).message);
+      throw new Error("Failed to create alert: " + (error instanceof Error ? error.message : String(error)));
     }
   }
 
-  /**
-   * Activate an alert
-   * @param accountId The account ID
-   * @param alertId The alert ID to activate
-   * @returns The activation response
-   */
-  async activateAlert(accountId: string, alertId: string): Promise<any> {
+  async activateAlert(accountId: string, alertId: string): Promise<unknown> {
     try {
       Logger.log(`[ALERT] Activating alert ${alertId} for account ${accountId}`);
-      
-      const response = await this.client.post(
-        `/iserver/account/${accountId}/alert/activate`,
-        { alertId }
-      );
-
+      const response = await this.request("POST", `/iserver/account/${accountId}/alert/activate`, { body: { alertId } });
       Logger.log("[ALERT] Alert activation response:", response.data);
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("[ALERT] Failed to activate alert:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to activate alerts. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to activate alerts. Please authenticate with Interactive Brokers first.");
       }
-      
-      throw new Error("Failed to activate alert: " + (error as any).message);
+      throw new Error("Failed to activate alert: " + (error instanceof Error ? error.message : String(error)));
     }
   }
 
-  /**
-   * Delete an alert
-   * @param accountId The account ID
-   * @param alertId The alert ID to delete
-   * @returns The deletion response
-   */
-  async deleteAlert(accountId: string, alertId: string): Promise<any> {
+  async deleteAlert(accountId: string, alertId: string): Promise<unknown> {
     try {
       Logger.log(`[ALERT] Deleting alert ${alertId} for account ${accountId}`);
-      
-      const response = await this.client.delete(
-        `/iserver/account/${accountId}/alert/${alertId}`
-      );
-
+      const response = await this.request("DELETE", `/iserver/account/${accountId}/alert/${alertId}`);
       Logger.log("[ALERT] Alert deletion response:", response.data);
       return response.data;
-    } catch (error) {
+    } catch (error: unknown) {
       Logger.error("[ALERT] Failed to delete alert:", error);
-      
-      // Check if this is likely an authentication error
       if (this.isAuthenticationError(error)) {
-        const authError = new Error("Authentication required to delete alerts. Please authenticate with Interactive Brokers first.");
-        (authError as any).isAuthError = true;
-        throw authError;
+        throw new AuthenticationError("Authentication required to delete alerts. Please authenticate with Interactive Brokers first.");
       }
-      
-      throw new Error("Failed to delete alert: " + (error as any).message);
+      throw new Error("Failed to delete alert: " + (error instanceof Error ? error.message : String(error)));
     }
   }
 }
