@@ -1,7 +1,6 @@
 // test/flex-query-client.test.ts
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { FlexQueryClient } from '../src/flex-query-client.js';
-import { HttpError } from '../src/http.js';
 
 const mockFetch = vi.fn();
 

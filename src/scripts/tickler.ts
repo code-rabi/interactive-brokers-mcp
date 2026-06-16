@@ -46,9 +46,9 @@ function isStatusAuthenticated(status: unknown): boolean {
   return statusObj.authenticated === true && statusObj.connected !== false;
 }
 
-async function request<T>(method: string, path: string): Promise<TickleResponse> {
+async function request<T>(method: string, path: string): Promise<T> {
   const response = await client.request<T>(method, path);
-  return response.data as TickleResponse;
+  return response.data;
 }
 
 async function checkAndTickle(): Promise<boolean> {
@@ -66,7 +66,7 @@ async function checkAndTickle(): Promise<boolean> {
     }
 
     const authStatus = tickleResponse.iserver?.authStatus;
-    if (authStatus && !isStatusAuthenticated(authStatus)) {
+    if (!isStatusAuthenticated(authStatus)) {
       console.log("[TICKLER] Session no longer authenticated. Self-terminating.");
       return false;
     }
