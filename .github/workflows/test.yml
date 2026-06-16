@@ -3,8 +3,6 @@ name: Tests
 on:
   push:
     branches: [main, master, develop]
-  pull_request:
-    branches: [main, master, develop]
 
 jobs:
   test:
@@ -12,17 +10,16 @@ jobs:
     env:
       IB_USERNAME: ${{ secrets.IB_USERNAME }}
       IB_PASSWORD: ${{ secrets.IB_PASSWORD }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
           cache: 'npm'
-      
+
       - name: Install dependencies
         run: npm ci
 
@@ -31,7 +28,7 @@ jobs:
 
       - name: Run linter
         run: npm run lint
-      
+
       - name: Install Playwright Chromium (E2E only)
         if: ${{ env.IB_USERNAME != '' && env.IB_PASSWORD != '' }}
         run: npx playwright-core install chromium
