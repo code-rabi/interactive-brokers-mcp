@@ -14,7 +14,7 @@ serverOptions:
   maxWorkerExecuteTime: 100
   internalBlockingPoolSize: 20
 cors:
-  origin.allowed: ""
+  origin.allowed: "*"
   allowCredentials: false
 webApps:
   - name: "demo"
