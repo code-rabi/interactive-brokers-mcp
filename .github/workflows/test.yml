@@ -9,7 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+    env:
+      IB_USERNAME: ${{ secrets.IB_USERNAME }}
+      IB_PASSWORD: ${{ secrets.IB_PASSWORD }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,5 +32,9 @@ jobs:
       - name: Run linter
         run: npm run lint
       
+      - name: Install Playwright Chromium (E2E only)
+        if: ${{ env.IB_USERNAME != '' && env.IB_PASSWORD != '' }}
+        run: npx playwright-core install chromium
+
       - name: Run tests
         run: npm test
