@@ -107,24 +107,25 @@ export class HeadlessAuthenticator {
           // Wait a moment for any dynamic content to load
           await this.page.waitForTimeout(1000);
           
-          // Look for the specific paper trading checkbox
-          const paperSwitchSelector = 'label[for="toggle1"]';
-          
-          const element = await this.page.$(paperSwitchSelector);
-          if (element) {
-            const isChecked = await element.isChecked();
+          // The visible switch is a <label> driving a hidden checkbox. Read the
+          // checked state from the checkbox itself (calling isChecked() on the
+          // label throws), but click the label to actually toggle it.
+          const paperCheckbox = await this.page.$('#toggle1, input[name="paperSwitch"]');
+          if (paperCheckbox) {
+            const isChecked = await paperCheckbox.isChecked();
             const shouldBeChecked = authConfig.paperTrading;
-            
+
             if (isChecked !== shouldBeChecked) {
-              Logger.info(`📊 Clicking paper trading checkbox to turn it ${shouldBeChecked ? 'ON' : 'OFF'}`);
-              await element.click();
+              Logger.info(`📊 Clicking paper trading toggle to turn it ${shouldBeChecked ? 'ON' : 'OFF'}`);
+              const label = await this.page.$('label[for="toggle1"]');
+              await (label ?? paperCheckbox).click();
               // Wait for any page updates after toggling
               await this.page.waitForTimeout(500);
             } else {
-              Logger.info(`📊 Paper trading checkbox already in correct state: ${shouldBeChecked ? 'ON' : 'OFF'}`);
+              Logger.info(`📊 Paper trading toggle already in correct state: ${shouldBeChecked ? 'ON' : 'OFF'}`);
             }
           } else {
-            Logger.warn('⚠️ Paper trading checkbox not found - may not be available for this account type');
+            Logger.warn('⚠️ Paper trading toggle not found - may not be available for this account type');
           }
           
         } catch (error) {
@@ -333,6 +334,7 @@ export class HeadlessAuthenticator {
       'authentication failed',
       'account is locked',
       'too many failed',
+      'select the correct login mode',
     ];
     const matchedIndicator = failureIndicators.find((indicator) => text.includes(indicator));
 
