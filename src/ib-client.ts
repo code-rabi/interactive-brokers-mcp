@@ -30,9 +30,37 @@ interface TickleResponse {
   iserver?: { authStatus?: AuthStatusResponse };
 }
 
+interface ContractSection {
+  secType?: string;
+  months?: string;
+  exchange?: string;
+}
+
 interface ContractSearch {
-  conid: number;
+  conid: number | string;
   symbol: string;
+  description?: string;
+  companyHeader?: string;
+  sections?: ContractSection[];
+}
+
+interface OptionStrikesResponse {
+  call?: number[];
+  put?: number[];
+}
+
+interface OptionContractInfo {
+  conid: number | string;
+  symbol: string;
+  secType?: string;
+  exchange?: string;
+  right?: string;
+  strike?: number;
+  maturityDate?: string;
+  multiplier?: string;
+  validExchanges?: string;
+  desc1?: string;
+  desc2?: string;
 }
 
 interface OrderConfirmation {
@@ -47,6 +75,7 @@ interface OrderPayload {
   side: string;
   quantity: number;
   tif: string;
+  secType?: string;
   exchange?: string;
   price?: number;
   auxPrice?: number;
@@ -65,17 +94,35 @@ interface IBClientConfig {
   port: number;
 }
 
-interface OrderRequest {
+interface ContractLookupRequest {
+  symbol?: string;
+  conid?: number;
+  secType?: "STK" | "OPT";
+  expiry?: string;
+  strike?: number;
+  right?: "C" | "P";
+  exchange?: string;
+}
+
+interface MarketDataRequest extends ContractLookupRequest {}
+
+interface OrderRequest extends ContractLookupRequest {
   accountId: string;
-  symbol: string;
   action: "BUY" | "SELL";
   orderType: "MKT" | "LMT" | "STP";
   quantity: number;
   price?: number;
   stopPrice?: number;
   suppressConfirmations?: boolean;
-  exchange?: string;
   tif?: "DAY" | "GTC" | "IOC" | "OPG";
+}
+
+interface ResolvedContract {
+  conid: number;
+  symbol: string;
+  secType: "STK" | "OPT";
+  contract: ContractSearch | OptionContractInfo;
+  underlyingConid?: number;
 }
 
 class AuthenticationError extends Error {
@@ -566,6 +613,236 @@ export class IBClient {
     }
   }
 
+  private async searchContracts(symbol: string): Promise<ContractSearch[]> {
+    const response = await this.request<ContractSearch[]>(
+      "GET",
+      `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`,
+    );
+
+    if (!response.data || response.data.length === 0) {
+      throw new SymbolNotFoundError(`Symbol ${symbol} not found`);
+    }
+
+    return response.data;
+  }
+
+  private matchesExchange(contract: ContractSearch | OptionContractInfo, exchange?: string): boolean {
+    if (!exchange) return true;
+
+    const target = exchange.toUpperCase();
+    const values = [
+      contract.exchange,
+      contract.validExchanges,
+      contract.description,
+      contract.companyHeader,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.toUpperCase());
+
+    return values.some((value) => value.includes(target));
+  }
+
+  private pickContract<T extends ContractSearch | OptionContractInfo>(
+    contracts: T[],
+    exchange?: string,
+  ): T {
+    const match = contracts.find((contract) => this.matchesExchange(contract, exchange));
+    return match ?? contracts[0];
+  }
+
+  private getOptionMonths(contract: ContractSearch): string[] {
+    const months = contract.sections
+      ?.filter((section) => section.secType === "OPT" && typeof section.months === "string")
+      .flatMap((section) => section.months!.split(";"))
+      .map((month) => month.trim())
+      .filter(Boolean) ?? [];
+
+    return [...new Set(months)];
+  }
+
+  private buildOptionStrikesUrl(underlyingConid: number, expiry: string, exchange?: string): string {
+    const params = new URLSearchParams({
+      conid: String(underlyingConid),
+      secType: "OPT",
+      month: expiry.toUpperCase(),
+    });
+
+    if (exchange) {
+      params.set("exchange", exchange);
+    }
+
+    return `/iserver/secdef/strikes?${params.toString()}`;
+  }
+
+  private buildOptionInfoUrl(
+    underlyingConid: number,
+    expiry: string,
+    strike: number,
+    right: "C" | "P",
+    exchange?: string,
+  ): string {
+    const params = new URLSearchParams({
+      conid: String(underlyingConid),
+      secType: "OPT",
+      month: expiry.toUpperCase(),
+      strike: String(strike),
+      right,
+    });
+
+    if (exchange) {
+      params.set("exchange", exchange);
+    }
+
+    return `/iserver/secdef/info?${params.toString()}`;
+  }
+
+  private async resolveUnderlyingContract(symbol: string, exchange?: string): Promise<ResolvedContract> {
+    const contracts = await this.searchContracts(symbol);
+    const contract = this.pickContract(contracts, exchange);
+
+    return {
+      conid: Number(contract.conid),
+      symbol: contract.symbol,
+      secType: "STK",
+      contract,
+    };
+  }
+
+  private async resolveOptionContract(request: ContractLookupRequest): Promise<ResolvedContract> {
+    if (!request.symbol || !request.expiry || request.strike === undefined || !request.right) {
+      throw new Error("Option contract resolution requires symbol, expiry, strike, and right");
+    }
+
+    const underlying = await this.resolveUnderlyingContract(request.symbol, request.exchange);
+    const response = await this.request<OptionContractInfo[]>(
+      "GET",
+      this.buildOptionInfoUrl(
+        underlying.conid,
+        request.expiry,
+        Number(request.strike),
+        request.right,
+        request.exchange,
+      ),
+    );
+
+    if (!response.data || response.data.length === 0) {
+      throw new SymbolNotFoundError(
+        `Option ${request.symbol} ${request.expiry} ${request.strike} ${request.right} not found`,
+      );
+    }
+
+    const contract = this.pickContract(response.data, request.exchange);
+
+    return {
+      conid: Number(contract.conid),
+      symbol: contract.symbol || request.symbol,
+      secType: "OPT",
+      contract,
+      underlyingConid: underlying.conid,
+    };
+  }
+
+  private async resolveContract(request: ContractLookupRequest): Promise<ResolvedContract> {
+    if (request.conid !== undefined) {
+      return {
+        conid: Number(request.conid),
+        symbol: request.symbol || String(request.conid),
+        secType: request.secType || "STK",
+        contract: {
+          conid: Number(request.conid),
+          symbol: request.symbol || String(request.conid),
+        },
+      };
+    }
+
+    if (request.secType === "OPT") {
+      return this.resolveOptionContract(request);
+    }
+
+    if (!request.symbol) {
+      throw new Error("Symbol is required when conid is not provided");
+    }
+
+    return this.resolveUnderlyingContract(request.symbol, request.exchange);
+  }
+
+  async getOptionChain(symbol: string, exchange?: string): Promise<{
+    symbol: string;
+    underlyingConid: number;
+    expirations: Array<{ expiry: string; call: number[]; put: number[] }>;
+  }> {
+    try {
+      const underlying = await this.resolveUnderlyingContract(symbol, exchange);
+      const expirations = this.getOptionMonths(underlying.contract as ContractSearch);
+      const optionChain = await Promise.all(
+        expirations.map(async (expiry) => {
+          const response = await this.request<OptionStrikesResponse>(
+            "GET",
+            this.buildOptionStrikesUrl(underlying.conid, expiry, exchange),
+          );
+
+          return {
+            expiry,
+            call: Array.isArray(response.data?.call) ? response.data.call : [],
+            put: Array.isArray(response.data?.put) ? response.data.put : [],
+          };
+        }),
+      );
+
+      return {
+        symbol: underlying.symbol,
+        underlyingConid: underlying.conid,
+        expirations: optionChain,
+      };
+    } catch (error: unknown) {
+      Logger.error("Failed to get option chain:", error);
+      if (this.isAuthenticationError(error)) {
+        throw new AuthenticationError(
+          "Authentication required to get option chain. Please authenticate with Interactive Brokers first.",
+        );
+      }
+      if (error instanceof SymbolNotFoundError) throw error;
+      throw new Error(`Failed to get option chain for ${symbol}`);
+    }
+  }
+
+  async resolveOptionConid(
+    symbol: string,
+    expiry: string,
+    strike: number,
+    right: "C" | "P",
+    exchange?: string,
+  ): Promise<{
+    symbol: string;
+    underlyingConid: number;
+    option: OptionContractInfo;
+  }> {
+    try {
+      const resolved = await this.resolveOptionContract({
+        symbol,
+        expiry,
+        strike,
+        right,
+        exchange,
+      });
+
+      return {
+        symbol: resolved.symbol,
+        underlyingConid: resolved.underlyingConid!,
+        option: resolved.contract as OptionContractInfo,
+      };
+    } catch (error: unknown) {
+      Logger.error("Failed to resolve option conid:", error);
+      if (this.isAuthenticationError(error)) {
+        throw new AuthenticationError(
+          "Authentication required to resolve option contracts. Please authenticate with Interactive Brokers first.",
+        );
+      }
+      if (error instanceof SymbolNotFoundError) throw error;
+      throw new Error(`Failed to resolve option conid for ${symbol} ${expiry} ${strike} ${right}`);
+    }
+  }
+
   async getMarketData(symbol: string, exchange?: string): Promise<{ symbol: string; contract: ContractSearch; marketData: unknown }> {
     try {
       let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
@@ -621,6 +898,42 @@ export class IBClient {
 
   async placeOrder(orderRequest: OrderRequest): Promise<unknown> {
     try {
+      if (orderRequest.conid !== undefined || orderRequest.secType === "OPT") {
+        const contract = await this.resolveContract(orderRequest);
+        const order: OrderPayload = {
+          conid: contract.conid,
+          orderType: orderRequest.orderType,
+          side: orderRequest.action,
+          quantity: Number(orderRequest.quantity),
+          tif: orderRequest.tif || "DAY",
+        };
+
+        if (orderRequest.exchange) order.exchange = orderRequest.exchange;
+        if (contract.secType === "OPT" || orderRequest.secType === "OPT") order.secType = "OPT";
+        if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
+          order.price = Number(orderRequest.price);
+        }
+        if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) {
+          order.auxPrice = Number(orderRequest.stopPrice);
+        }
+
+        const response = await this.request<OrderConfirmation[]>(
+          "POST",
+          `/iserver/account/${orderRequest.accountId}/orders`,
+          { body: { orders: [order] } },
+        );
+
+        if (Array.isArray(response.data) && response.data.length > 0) {
+          const first = response.data[0];
+          if (first.id && first.message && first.messageIds && orderRequest.suppressConfirmations) {
+            Logger.log("Order confirmation received, auto-confirming", first);
+            return await this.confirmOrder(first.id, first.messageIds);
+          }
+        }
+
+        return response.data;
+      }
+
       let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
       if (orderRequest.exchange) searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
       const searchResponse = await this.request<ContractSearch[]>("GET", searchUrl);

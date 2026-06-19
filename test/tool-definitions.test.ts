@@ -396,5 +396,65 @@ describe('Tool Definitions - Zod Schemas', () => {
       expect(result.success).toBe(false);
     });
   });
-});
 
+  describe('Option contract schemas', () => {
+    it('should accept valid option chain requests', async () => {
+      const { GetOptionChainZodSchema } = await import('../src/tool-definitions.js');
+
+      const result = GetOptionChainZodSchema.safeParse({
+        symbol: 'AAPL',
+        exchange: 'SMART',
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept valid option conid resolution requests', async () => {
+      const { ResolveOptionConidZodSchema } = await import('../src/tool-definitions.js');
+
+      const result = ResolveOptionConidZodSchema.safeParse({
+        symbol: 'AAPL',
+        expiry: 'JAN27',
+        strike: '200',
+        right: 'C',
+      });
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.strike).toBe(200);
+      }
+    });
+
+    it('should accept option orders with contract details', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        secType: 'OPT',
+        expiry: 'JAN27',
+        strike: 200,
+        right: 'C',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 1,
+        price: 4.5,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject option orders missing expiry when conid is not provided', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        secType: 'OPT',
+        strike: 200,
+        right: 'C',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+      });
+
+      expect(result.success).toBe(false);
+    });
+  });
+});
