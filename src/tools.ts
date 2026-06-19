@@ -1,7 +1,7 @@
-import McpServer from "@modelcontextprotocol/sdk/server/mcp.js";
-import IBClient from "./ib-client.js";
-import IBGatewayManager from "./gateway-manager.js";
-import { ToolHandlers, ToolHandlerContext } from "./tool-handlers.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { IBClient } from "./ib-client.js";
+import { IBGatewayManager } from "./gateway-manager.js";
+import { ToolHandlers, type ToolHandlerContext } from "./tool-handlers.js";
 import {
   ActivateAlertZodShape,
   AuthenticateZodShape,
