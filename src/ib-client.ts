@@ -104,8 +104,6 @@ interface ContractLookupRequest {
   exchange?: string;
 }
 
-interface MarketDataRequest extends ContractLookupRequest {}
-
 interface OrderRequest extends ContractLookupRequest {
   accountId: string;
   action: "BUY" | "SELL";
@@ -631,10 +629,10 @@ export class IBClient {
 
     const target = exchange.toUpperCase();
     const values = [
-      contract.exchange,
-      contract.validExchanges,
-      contract.description,
-      contract.companyHeader,
+      "exchange" in contract ? contract.exchange : undefined,
+      "validExchanges" in contract ? contract.validExchanges : undefined,
+      "description" in contract ? contract.description : undefined,
+      "companyHeader" in contract ? contract.companyHeader : undefined,
     ]
       .filter((value): value is string => typeof value === "string")
       .map((value) => value.toUpperCase());
@@ -774,20 +772,32 @@ export class IBClient {
     try {
       const underlying = await this.resolveUnderlyingContract(symbol, exchange);
       const expirations = this.getOptionMonths(underlying.contract as ContractSearch);
-      const optionChain = await Promise.all(
-        expirations.map(async (expiry) => {
-          const response = await this.request<OptionStrikesResponse>(
-            "GET",
-            this.buildOptionStrikesUrl(underlying.conid, expiry, exchange),
-          );
+      const batchSize = 3;
+      const optionChain: Array<{
+        expiry: string;
+        call: number[];
+        put: number[];
+      }> = [];
 
-          return {
-            expiry,
-            call: Array.isArray(response.data?.call) ? response.data.call : [],
-            put: Array.isArray(response.data?.put) ? response.data.put : [],
-          };
-        }),
-      );
+      for (let index = 0; index < expirations.length; index += batchSize) {
+        const batch = expirations.slice(index, index + batchSize);
+        const resolvedBatch = await Promise.all(
+          batch.map(async (expiry) => {
+            const response = await this.request<OptionStrikesResponse>(
+              "GET",
+              this.buildOptionStrikesUrl(underlying.conid, expiry, exchange),
+            );
+
+            return {
+              expiry,
+              call: Array.isArray(response.data?.call) ? response.data.call : [],
+              put: Array.isArray(response.data?.put) ? response.data.put : [],
+            };
+          }),
+        );
+
+        optionChain.push(...resolvedBatch);
+      }
 
       return {
         symbol: underlying.symbol,
@@ -934,7 +944,11 @@ export class IBClient {
         return response.data;
       }
 
-      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
+    if (!orderRequest.symbol) {
+      throw new Error("Symbol is required when conid is not provided");
+    }
+
+    let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
       if (orderRequest.exchange) searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
       const searchResponse = await this.request<ContractSearch[]>("GET", searchUrl);
 
