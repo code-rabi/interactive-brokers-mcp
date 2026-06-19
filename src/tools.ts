@@ -31,16 +31,19 @@ export function registerTools(
   const context: ToolHandlerContext = {
     ibClient,
     gatewayManager,
-    config: userConfig ?? {},
+    config: userConfig,
   };
 
   const handlers = new ToolHandlers(context);
+
   const registerTool = (
     name: string,
     description: string,
     schema: Record<string, unknown>,
     handler: (args: any) => Promise<any>,
-  ) => server.tool(name, description, schema as never, handler as never);
+  ) => {
+    server.tool(name, description, schema as never, handler as never);
+  };
 
   registerTool(
     "authenticate",
@@ -58,28 +61,28 @@ export function registerTools(
 
   registerTool(
     "get_positions",
-    "Get current positions. Usage: `{ \"accountId\": \"U1234567\" }`.",
+    "Get current positions. Usage: `{}` or `{ \"accountId\": \"<id>\" }`.",
     GetPositionsZodShape,
     async (args) => await handlers.getPositions(args),
   );
 
   registerTool(
     "get_option_chain",
-    "Get option expirations and strikes for an underlying symbol. Usage: `{ \"symbol\": \"AAPL\", \"exchange\": \"SMART\" }`.",
+    "Get option expirations and strikes for an underlying symbol. Usage: `{ \"symbol\": \"AAPL\" }` or `{ \"symbol\": \"AAPL\", \"exchange\": \"SMART\" }`.",
     GetOptionChainZodShape,
     async (args) => await handlers.getOptionChain(args),
   );
 
   registerTool(
     "resolve_option_conid",
-    "Resolve a specific option contract conid from symbol, expiry, strike, and right. Usage: `{ \"symbol\": \"AAPL\", \"expiry\": \"JAN27\", \"strike\": 200, \"right\": \"C\" }`.",
+    "Resolve a specific option contract conid. Usage: `{ \"symbol\": \"AAPL\", \"expiry\": \"JAN27\", \"strike\": 200, \"right\": \"C\" }` or add `{ \"exchange\": \"SMART\" }`.",
     ResolveOptionConidZodShape,
     async (args) => await handlers.resolveOptionConid(args),
   );
 
   registerTool(
     "get_market_data",
-    "Get real-time market data. Usage: `{ \"symbol\": \"AAPL\" }`.",
+    "Get real-time market data. Usage: `{ \"symbol\": \"AAPL\" }` or `{ \"symbol\": \"AAPL\", \"exchange\": \"NASDAQ\" }`.",
     GetMarketDataZodShape,
     async (args) => await handlers.getMarketData(args),
   );
@@ -87,7 +90,13 @@ export function registerTools(
   if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "place_order",
-      "Place market, limit, or stop orders. Supports stocks by symbol and options via `conid` or `{ secType: \"OPT\", symbol, expiry, strike, right }`.",
+      "Place a trading order. Examples:\n" +
+        "- Market buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
+        "- Limit sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`\n" +
+        "- Stop sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"STP\",\"quantity\":1,\"stopPrice\":180 }`\n" +
+        "- Option buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"secType\":\"OPT\",\"expiry\":\"JAN27\",\"strike\":200,\"right\":\"C\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":4.5 }`\n" +
+        "- Option by conid: `{ \"accountId\":\"abc\",\"conid\":123456789,\"secType\":\"OPT\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
+        "- Suppress confirmations: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1,\"suppressConfirmations\":true }`",
       PlaceOrderZodShape,
       async (args) => await handlers.placeOrder(args),
     );
@@ -95,14 +104,15 @@ export function registerTools(
 
   registerTool(
     "get_order_status",
-    "Get order status. Usage: `{ \"orderId\": \"12345\" }`.",
+    "Get the status of a specific order. Usage: `{ \"orderId\": \"12345\" }`.",
     GetOrderStatusZodShape,
     async (args) => await handlers.getOrderStatus(args),
   );
 
   registerTool(
     "get_live_orders",
-    "Get live orders. Usage: `{ \"accountId\": \"U1234567\" }` or `{}`.",
+    "Get all live/open orders for monitoring and validation. Usage: `{}` for all accounts or `{ \"accountId\": \"<id>\" }` for a specific account. " +
+      "This is the recommended way to validate that market orders were executed successfully after placing them.",
     GetLiveOrdersZodShape,
     async (args) => await handlers.getLiveOrders(args),
   );
@@ -110,7 +120,7 @@ export function registerTools(
   if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "confirm_order",
-      "Confirm a pending order reply. Usage: `{ \"replyId\": \"...\", \"messageIds\": [\"...\"] }`.",
+      "Manually confirm an order that requires confirmation. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\", \"messageIds\": [\"o10151\", \"o10153\"] }`.",
       ConfirmOrderZodShape,
       async (args) => await handlers.confirmOrder(args),
     );
@@ -118,7 +128,7 @@ export function registerTools(
 
   registerTool(
     "get_alerts",
-    "Get alerts for an account. Usage: `{ \"accountId\": \"U1234567\" }`.",
+    "Get all trading alerts for an account. Usage: `{ \"accountId\": \"<id>\" }`.",
     GetAlertsZodShape,
     async (args) => await handlers.getAlerts(args),
   );
@@ -126,44 +136,50 @@ export function registerTools(
   if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "create_alert",
-      "Create an account alert.",
+      "Create a new trading alert. Usage: `{ \"accountId\": \"<id>\", \"alertRequest\": { \"alertName\": \"Price Alert\", \"conditions\": [{ \"conidex\": \"265598\", \"type\": \"price\", \"operator\": \">\", \"triggerMethod\": \"last\", \"value\": \"150\" }] } }`.",
       CreateAlertZodShape,
       async (args) => await handlers.createAlert(args),
     );
+  }
 
+  if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "activate_alert",
-      "Activate an alert. Usage: `{ \"accountId\": \"U1234567\", \"alertId\": \"123\" }`.",
+      "Activate a previously created alert. Usage: `{ \"accountId\": \"<id>\", \"alertId\": \"<alertId>\" }`.",
       ActivateAlertZodShape,
       async (args) => await handlers.activateAlert(args),
     );
+  }
 
+  if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "delete_alert",
-      "Delete an alert. Usage: `{ \"accountId\": \"U1234567\", \"alertId\": \"123\" }`.",
+      "Delete an alert. Usage: `{ \"accountId\": \"<id>\", \"alertId\": \"<alertId>\" }`.",
       DeleteAlertZodShape,
       async (args) => await handlers.deleteAlert(args),
     );
   }
 
-  registerTool(
-    "get_flex_query",
-    "Run a configured Flex Query. Usage: `{ \"queryId\": \"...\", \"queryName\": \"optional\", \"parseXml\": true }`.",
-    GetFlexQueryZodShape,
-    async (args) => await handlers.getFlexQuery(args),
-  );
+  if (userConfig?.IB_FLEX_TOKEN) {
+    registerTool(
+      "get_flex_query",
+      "Execute a Flex Query and retrieve statements/data. The query will be automatically remembered for future use. " +
+        "Usage: `{ \"queryId\": \"123456\" }` or with a friendly name: `{ \"queryId\": \"123456\", \"queryName\": \"Monthly Trades\" }`. " +
+        "Set `parseXml: false` to get raw XML instead of parsed JSON.",
+      GetFlexQueryZodShape,
+      async (args) => await handlers.getFlexQuery(args),
+    );
 
-  registerTool(
-    "list_flex_queries",
-    "List remembered Flex Queries. Usage: `{ \"confirm\": true }`.",
-    ListFlexQueriesZodShape,
-    async (args) => await handlers.listFlexQueries(args),
-  );
+    registerTool(
+      "list_flex_queries",
+      "List all previously used Flex Queries that have been automatically saved. Usage: `{ \"confirm\": true }`.",
+      ListFlexQueriesZodShape,
+      async (args) => await handlers.listFlexQueries(args),
+    );
 
-  if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "forget_flex_query",
-      "Forget a remembered Flex Query. Usage: `{ \"queryId\": \"...\" }`.",
+      "Remove a saved Flex Query from memory. Usage: `{ \"queryId\": \"123456\" }`.",
       ForgetFlexQueryZodShape,
       async (args) => await handlers.forgetFlexQuery(args),
     );
