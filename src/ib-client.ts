@@ -11,132 +11,48 @@ import {
   type RequestOptions,
 } from "./http.js";
 
+import { getAccountInfo, getPositions } from "./ib-client/accounts.js";
+import { getMarketData } from "./ib-client/market-data.js";
+import { getOptionChain, resolveOptionConid } from "./ib-client/options.js";
+import { placeOrder, confirmOrder, getOrderStatus, getOrders } from "./ib-client/orders.js";
+import { getAlerts, createAlert, activateAlert, deleteAlert } from "./ib-client/alerts.js";
+import {
+  type AccountEntry,
+  type AuthStatusResponse,
+  type ContractLookupRequest,
+  type ContractSearch,
+  type ContractSection,
+  type IBClientConfig,
+  type OptionContractInfo,
+  type OptionStrikesResponse,
+  type OrderConfirmation,
+  type OrderPayload,
+  type OrderRequest,
+  type ResolvedContract,
+  type TickleResponse,
+  AuthenticationError,
+  SymbolNotFoundError,
+} from "./ib-client/types.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-// ---------------------------------------------------------------------------
-// IB Gateway response shapes — only the fields we actually access
-// ---------------------------------------------------------------------------
-
-interface AuthStatusResponse {
-  authenticated?: boolean;
-  connected?: boolean;
-  established?: boolean;
-  MAC?: string;
-  hardware_info?: string;
-}
-
-interface TickleResponse {
-  iserver?: { authStatus?: AuthStatusResponse };
-}
-
-interface ContractSection {
-  secType?: string;
-  months?: string;
-  exchange?: string;
-}
-
-interface ContractSearch {
-  conid: number | string;
-  symbol: string;
-  description?: string;
-  companyHeader?: string;
-  sections?: ContractSection[];
-}
-
-interface OptionStrikesResponse {
-  call?: number[];
-  put?: number[];
-}
-
-interface OptionContractInfo {
-  conid: number | string;
-  symbol: string;
-  secType?: string;
-  exchange?: string;
-  right?: string;
-  strike?: number;
-  maturityDate?: string;
-  multiplier?: string;
-  validExchanges?: string;
-  desc1?: string;
-  desc2?: string;
-}
-
-interface OrderConfirmation {
-  id?: string;
-  message?: string[];
-  messageIds?: string[];
-}
-
-interface OrderPayload {
-  conid: number;
-  orderType: string;
-  side: string;
-  quantity: number;
-  tif: string;
-  secType?: string;
-  exchange?: string;
-  price?: number;
-  auxPrice?: number;
-}
-
-interface AccountEntry {
-  id?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Config & public types
-// ---------------------------------------------------------------------------
-
-interface IBClientConfig {
-  host: string;
-  port: number;
-}
-
-interface ContractLookupRequest {
-  symbol?: string;
-  conid?: number;
-  secType?: "STK" | "OPT";
-  expiry?: string;
-  strike?: number;
-  right?: "C" | "P";
-  exchange?: string;
-}
-
-interface OrderRequest extends ContractLookupRequest {
-  accountId: string;
-  action: "BUY" | "SELL";
-  orderType: "MKT" | "LMT" | "STP";
-  quantity: number;
-  price?: number;
-  stopPrice?: number;
-  suppressConfirmations?: boolean;
-  tif?: "DAY" | "GTC" | "IOC" | "OPG";
-}
-
-interface ResolvedContract {
-  conid: number;
-  symbol: string;
-  secType: "STK" | "OPT";
-  contract: ContractSearch | OptionContractInfo;
-  underlyingConid?: number;
-}
-
-class AuthenticationError extends Error {
-  readonly isAuthError = true;
-  constructor(message: string) {
-    super(message);
-    this.name = "AuthenticationError";
-  }
-}
-
-export class SymbolNotFoundError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "SymbolNotFoundError";
-  }
-}
+export { AuthenticationError, SymbolNotFoundError };
+export type {
+  AccountEntry,
+  AuthStatusResponse,
+  ContractLookupRequest,
+  ContractSearch,
+  ContractSection,
+  IBClientConfig,
+  OptionContractInfo,
+  OptionStrikesResponse,
+  OrderConfirmation,
+  OrderPayload,
+  OrderRequest,
+  ResolvedContract,
+  TickleResponse,
+};
 
 // ---------------------------------------------------------------------------
 // Client
@@ -173,8 +89,8 @@ export class IBClient {
     }
   }
 
-  // Authenticated request with logging (replaces axios interceptors)
-  private async request<T = unknown>(
+  // Authenticated request with logging
+  public async request<T = unknown>(
     method: string,
     urlPath: string,
     options?: RequestOptions,
@@ -571,249 +487,22 @@ export class IBClient {
   // ---------------------------------------------------------------------------
 
   async getAccountInfo(): Promise<{ accounts: unknown; summaries: Array<{ accountId: string; summary: unknown }> }> {
-    Logger.log("[ACCOUNT-INFO] Starting getAccountInfo request...");
-    try {
-      const accountsResponse = await this.request<AccountEntry[]>("GET", "/portfolio/accounts");
-      const accounts = accountsResponse.data;
-      Logger.log(`[ACCOUNT-INFO] Found ${accounts?.length || 0} accounts:`, accounts);
-
-      const summaries: Array<{ accountId: string; summary: unknown }> = [];
-      for (let i = 0; i < accounts.length; i++) {
-        const account = accounts[i];
-        Logger.log(`[ACCOUNT-INFO] Processing account ${i + 1}/${accounts.length}: ${account.id}`);
-        const summaryResponse = await this.request("GET", `/portfolio/${account.id}/summary`);
-        Logger.log(`[ACCOUNT-INFO] Account ${account.id} summary:`, summaryResponse.data);
-        summaries.push({ accountId: account.id!, summary: summaryResponse.data });
-      }
-
-      Logger.log(`[ACCOUNT-INFO] Completed processing ${summaries.length} accounts`);
-      return { accounts, summaries };
-    } catch (error: unknown) {
-      Logger.error("[ACCOUNT-INFO] Failed to get account info:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to retrieve account information. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to retrieve account information");
-    }
+    return getAccountInfo(this);
   }
 
   async getPositions(accountId?: string): Promise<unknown> {
-    try {
-      const url = accountId ? `/portfolio/${accountId}/positions` : "/portfolio/positions";
-      const response = await this.request("GET", url);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("Failed to get positions:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to retrieve positions. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to retrieve positions");
-    }
+    return getPositions(this, accountId);
   }
 
-  private async searchContracts(symbol: string): Promise<ContractSearch[]> {
-    const response = await this.request<ContractSearch[]>(
-      "GET",
-      `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`,
-    );
-
-    if (!response.data || response.data.length === 0) {
-      throw new SymbolNotFoundError(`Symbol ${symbol} not found`);
-    }
-
-    return response.data;
-  }
-
-  private matchesExchange(contract: ContractSearch | OptionContractInfo, exchange?: string): boolean {
-    if (!exchange) return true;
-
-    const target = exchange.toUpperCase();
-    const values = [
-      "exchange" in contract ? contract.exchange : undefined,
-      "validExchanges" in contract ? contract.validExchanges : undefined,
-      "description" in contract ? contract.description : undefined,
-      "companyHeader" in contract ? contract.companyHeader : undefined,
-    ]
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.toUpperCase());
-
-    return values.some((value) => value.includes(target));
-  }
-
-  private pickContract<T extends ContractSearch | OptionContractInfo>(
-    contracts: T[],
+  async getOptionChain(
+    symbol: string,
     exchange?: string,
-  ): T {
-    const match = contracts.find((contract) => this.matchesExchange(contract, exchange));
-    return match ?? contracts[0];
-  }
-
-  private getOptionMonths(contract: ContractSearch): string[] {
-    const months = contract.sections
-      ?.filter((section) => section.secType === "OPT" && typeof section.months === "string")
-      .flatMap((section) => section.months!.split(";"))
-      .map((month) => month.trim())
-      .filter(Boolean) ?? [];
-
-    return [...new Set(months)];
-  }
-
-  private buildOptionStrikesUrl(underlyingConid: number, expiry: string, exchange?: string): string {
-    const params = new URLSearchParams({
-      conid: String(underlyingConid),
-      secType: "OPT",
-      month: expiry.toUpperCase(),
-    });
-
-    if (exchange) {
-      params.set("exchange", exchange);
-    }
-
-    return `/iserver/secdef/strikes?${params.toString()}`;
-  }
-
-  private buildOptionInfoUrl(
-    underlyingConid: number,
-    expiry: string,
-    strike: number,
-    right: "C" | "P",
-    exchange?: string,
-  ): string {
-    const params = new URLSearchParams({
-      conid: String(underlyingConid),
-      secType: "OPT",
-      month: expiry.toUpperCase(),
-      strike: String(strike),
-      right,
-    });
-
-    if (exchange) {
-      params.set("exchange", exchange);
-    }
-
-    return `/iserver/secdef/info?${params.toString()}`;
-  }
-
-  private async resolveUnderlyingContract(symbol: string, exchange?: string): Promise<ResolvedContract> {
-    const contracts = await this.searchContracts(symbol);
-    const contract = this.pickContract(contracts, exchange);
-
-    return {
-      conid: Number(contract.conid),
-      symbol: contract.symbol,
-      secType: "STK",
-      contract,
-    };
-  }
-
-  private async resolveOptionContract(request: ContractLookupRequest): Promise<ResolvedContract> {
-    if (!request.symbol || !request.expiry || request.strike === undefined || !request.right) {
-      throw new Error("Option contract resolution requires symbol, expiry, strike, and right");
-    }
-
-    const underlying = await this.resolveUnderlyingContract(request.symbol, request.exchange);
-    const response = await this.request<OptionContractInfo[]>(
-      "GET",
-      this.buildOptionInfoUrl(
-        underlying.conid,
-        request.expiry,
-        Number(request.strike),
-        request.right,
-        request.exchange,
-      ),
-    );
-
-    if (!response.data || response.data.length === 0) {
-      throw new SymbolNotFoundError(
-        `Option ${request.symbol} ${request.expiry} ${request.strike} ${request.right} not found`,
-      );
-    }
-
-    const contract = this.pickContract(response.data, request.exchange);
-
-    return {
-      conid: Number(contract.conid),
-      symbol: contract.symbol || request.symbol,
-      secType: "OPT",
-      contract,
-      underlyingConid: underlying.conid,
-    };
-  }
-
-  private async resolveContract(request: ContractLookupRequest): Promise<ResolvedContract> {
-    if (request.conid !== undefined) {
-      return {
-        conid: Number(request.conid),
-        symbol: request.symbol || String(request.conid),
-        secType: request.secType || "STK",
-        contract: {
-          conid: Number(request.conid),
-          symbol: request.symbol || String(request.conid),
-        },
-      };
-    }
-
-    if (request.secType === "OPT") {
-      return this.resolveOptionContract(request);
-    }
-
-    if (!request.symbol) {
-      throw new Error("Symbol is required when conid is not provided");
-    }
-
-    return this.resolveUnderlyingContract(request.symbol, request.exchange);
-  }
-
-  async getOptionChain(symbol: string, exchange?: string): Promise<{
+  ): Promise<{
     symbol: string;
     underlyingConid: number;
     expirations: Array<{ expiry: string; call: number[]; put: number[] }>;
   }> {
-    try {
-      const underlying = await this.resolveUnderlyingContract(symbol, exchange);
-      const expirations = this.getOptionMonths(underlying.contract as ContractSearch);
-      const batchSize = 3;
-      const optionChain: Array<{
-        expiry: string;
-        call: number[];
-        put: number[];
-      }> = [];
-
-      for (let index = 0; index < expirations.length; index += batchSize) {
-        const batch = expirations.slice(index, index + batchSize);
-        const resolvedBatch = await Promise.all(
-          batch.map(async (expiry) => {
-            const response = await this.request<OptionStrikesResponse>(
-              "GET",
-              this.buildOptionStrikesUrl(underlying.conid, expiry, exchange),
-            );
-
-            return {
-              expiry,
-              call: Array.isArray(response.data?.call) ? response.data.call : [],
-              put: Array.isArray(response.data?.put) ? response.data.put : [],
-            };
-          }),
-        );
-
-        optionChain.push(...resolvedBatch);
-      }
-
-      return {
-        symbol: underlying.symbol,
-        underlyingConid: underlying.conid,
-        expirations: optionChain,
-      };
-    } catch (error: unknown) {
-      Logger.error("Failed to get option chain:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError(
-          "Authentication required to get option chain. Please authenticate with Interactive Brokers first.",
-        );
-      }
-      if (error instanceof SymbolNotFoundError) throw error;
-      throw new Error(`Failed to get option chain for ${symbol}`);
-    }
+    return getOptionChain(this, symbol, exchange);
   }
 
   async resolveOptionConid(
@@ -827,340 +516,42 @@ export class IBClient {
     underlyingConid: number;
     option: OptionContractInfo;
   }> {
-    try {
-      const resolved = await this.resolveOptionContract({
-        symbol,
-        expiry,
-        strike,
-        right,
-        exchange,
-      });
-
-      return {
-        symbol: resolved.symbol,
-        underlyingConid: resolved.underlyingConid!,
-        option: resolved.contract as OptionContractInfo,
-      };
-    } catch (error: unknown) {
-      Logger.error("Failed to resolve option conid:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError(
-          "Authentication required to resolve option contracts. Please authenticate with Interactive Brokers first.",
-        );
-      }
-      if (error instanceof SymbolNotFoundError) throw error;
-      throw new Error(`Failed to resolve option conid for ${symbol} ${expiry} ${strike} ${right}`);
-    }
+    return resolveOptionConid(this, symbol, expiry, strike, right, exchange);
   }
 
   async getMarketData(symbol: string, exchange?: string): Promise<{ symbol: string; contract: ContractSearch; marketData: unknown }> {
-    try {
-      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
-      if (exchange) searchUrl += `&name=${encodeURIComponent(exchange)}`;
-      const searchResponse = await this.request<ContractSearch[]>("GET", searchUrl);
-
-      if (!searchResponse.data || searchResponse.data.length === 0) {
-        throw new SymbolNotFoundError(`Symbol ${symbol}${exchange ? " on " + exchange : ""} not found`);
-      }
-
-      const contract = searchResponse.data[0];
-      const response = await this.request("GET",
-        `/iserver/marketdata/snapshot?conids=${contract.conid}&fields=31,70,71,82,83,84,85,86,87,88`,
-      );
-      return { symbol, contract, marketData: response.data };
-    } catch (error: unknown) {
-      Logger.error("Failed to get market data:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError(`Authentication required to retrieve market data for ${symbol}. Please authenticate with Interactive Brokers first.`);
-      }
-      if (error instanceof SymbolNotFoundError) throw error;
-      throw new Error(`Failed to retrieve market data for ${symbol}`);
-    }
-  }
-
-  private isAuthenticationError(error: unknown): boolean {
-    if (!error) return false;
-
-    const message = error instanceof Error ? error.message : String(error);
-    if (
-      message.includes("authentication") ||
-      message.includes("authenticate") ||
-      message.includes("unauthorized") ||
-      message.includes("not authenticated") ||
-      message.includes("login")
-    ) return true;
-
-    if (error instanceof HttpError) {
-      const { status, data } = error.response;
-      if (status === 401 || status === 403 || status === 500) return true;
-      if (typeof data === "object" && data !== null) {
-        const obj = data as Record<string, unknown>;
-        if (obj.error === "not authenticated") return true;
-        if (typeof obj.error === "string" && status === 500 && obj.error.includes("authentication")) return true;
-        if (typeof obj.error === "object" && obj.error !== null) {
-          const nested = (obj.error as Record<string, unknown>).message;
-          if (typeof nested === "string" && (nested.includes("not authenticated") || nested.includes("authentication"))) return true;
-        }
-      }
-    }
-    return false;
+    return getMarketData(this, symbol, exchange);
   }
 
   async placeOrder(orderRequest: OrderRequest): Promise<unknown> {
-    try {
-      if (orderRequest.conid !== undefined || orderRequest.secType === "OPT") {
-        const contract = await this.resolveContract(orderRequest);
-        const order: OrderPayload = {
-          conid: contract.conid,
-          orderType: orderRequest.orderType,
-          side: orderRequest.action,
-          quantity: Number(orderRequest.quantity),
-          tif: orderRequest.tif || "DAY",
-        };
-
-        if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-        if (contract.secType === "OPT" || orderRequest.secType === "OPT") order.secType = "OPT";
-        if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
-          order.price = Number(orderRequest.price);
-        }
-        if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) {
-          order.auxPrice = Number(orderRequest.stopPrice);
-        }
-
-        const response = await this.request<OrderConfirmation[]>(
-          "POST",
-          `/iserver/account/${orderRequest.accountId}/orders`,
-          { body: { orders: [order] } },
-        );
-
-        if (Array.isArray(response.data) && response.data.length > 0) {
-          const first = response.data[0];
-          if (first.id && first.message && first.messageIds && orderRequest.suppressConfirmations) {
-            Logger.log("Order confirmation received, auto-confirming", first);
-            return await this.confirmOrder(first.id, first.messageIds);
-          }
-        }
-
-        return response.data;
-      }
-
-    if (!orderRequest.symbol) {
-      throw new Error("Symbol is required when conid is not provided");
-    }
-
-    let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
-      if (orderRequest.exchange) searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
-      const searchResponse = await this.request<ContractSearch[]>("GET", searchUrl);
-
-      if (!searchResponse.data || searchResponse.data.length === 0) {
-        throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? " on " + orderRequest.exchange : ""} not found`);
-      }
-
-      const contract = searchResponse.data[0];
-      const order: OrderPayload = {
-        conid: Number(contract.conid),
-        orderType: orderRequest.orderType,
-        side: orderRequest.action,
-        quantity: Number(orderRequest.quantity),
-        tif: orderRequest.tif || "DAY",
-      };
-      if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-      if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) order.price = Number(orderRequest.price);
-      if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) order.auxPrice = Number(orderRequest.stopPrice);
-
-      const response = await this.request<OrderConfirmation[]>("POST",
-        `/iserver/account/${orderRequest.accountId}/orders`,
-        { body: { orders: [order] } },
-      );
-
-      if (Array.isArray(response.data) && response.data.length > 0) {
-        const first = response.data[0];
-        if (first.id && first.message && first.messageIds && orderRequest.suppressConfirmations) {
-          Logger.log("Order confirmation received, automatically confirming...", first);
-          return await this.confirmOrder(first.id, first.messageIds);
-        }
-      }
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("Failed to place order:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to place orders. Please authenticate with Interactive Brokers first.");
-      }
-      if (error instanceof SymbolNotFoundError) throw error;
-      throw new Error("Failed to place order");
-    }
+    return placeOrder(this, orderRequest);
   }
 
   async confirmOrder(replyId: string, messageIds: string[]): Promise<unknown> {
-    try {
-      Logger.log(`Confirming order with reply ID ${replyId} and message IDs:`, messageIds);
-      const response = await this.request("POST", `/iserver/reply/${replyId}`, {
-        body: { confirmed: true, messageIds },
-      });
-      Logger.log("Order confirmation response:", response.data);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("Failed to confirm order:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to confirm orders. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to confirm order: " + (error instanceof Error ? error.message : String(error)));
-    }
+    return confirmOrder(this, replyId, messageIds);
   }
 
   async getOrderStatus(orderId: string): Promise<unknown> {
-    try {
-      const response = await this.request("GET", `/iserver/account/orders/${orderId}`);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("Failed to get order status:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError(`Authentication required to get order status for order ${orderId}. Please authenticate with Interactive Brokers first.`);
-      }
-      throw new Error(`Failed to get status for order ${orderId}`);
-    }
-  }
-
-  private normalizeAccountId(account: unknown): string | undefined {
-    if (!account) return undefined;
-    if (typeof account === "string") return account.trim() || undefined;
-    if (typeof account === "object" && account !== null) {
-      const obj = account as Record<string, unknown>;
-      const id = obj.id ?? obj.accountId ?? obj.account_id ?? obj.acctId ?? obj.account;
-      return typeof id === "string" && id.trim() ? id.trim() : undefined;
-    }
-    return undefined;
-  }
-
-  private extractAccountIds(data: unknown): string[] {
-    const obj = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : undefined;
-    const candidates: unknown[] = [
-      ...(Array.isArray(data) ? data : []),
-      ...(Array.isArray(obj?.accounts) ? (obj.accounts as unknown[]) : []),
-      ...(Array.isArray(obj?.accountIds) ? (obj.accountIds as unknown[]) : []),
-      obj?.selectedAccount,
-      obj?.selected_account,
-    ];
-    return [...new Set(
-      candidates.map((a) => this.normalizeAccountId(a)).filter((id): id is string => Boolean(id)),
-    )];
-  }
-
-  private extractOrders(data: unknown): unknown[] {
-    if (Array.isArray(data)) return data;
-    if (typeof data === "object" && data !== null) {
-      const obj = data as Record<string, unknown>;
-      if (Array.isArray(obj.orders)) return obj.orders as unknown[];
-    }
-    return [];
-  }
-
-  private async getOrderAccountIds(): Promise<string[]> {
-    const sources = [
-      { label: "/iserver/accounts", fetch: () => this.request("GET", "/iserver/accounts") },
-      { label: "/portfolio/accounts", fetch: () => this.request("GET", "/portfolio/accounts") },
-    ];
-    for (const source of sources) {
-      try {
-        const response = await source.fetch();
-        const ids = this.extractAccountIds(response.data);
-        if (ids.length > 0) return ids;
-      } catch (error) {
-        Logger.warn(`[ORDERS] Failed to discover accounts via ${source.label}:`, error);
-      }
-    }
-    return [];
+    return getOrderStatus(this, orderId);
   }
 
   async getOrders(accountId?: string): Promise<unknown> {
-    try {
-      const url = "/iserver/account/orders";
-      if (accountId) {
-        const response = await this.request("GET", url, { params: { accountId } });
-        return response.data;
-      }
-
-      const accountIds = await this.getOrderAccountIds();
-      if (accountIds.length === 0) {
-        Logger.warn("[ORDERS] Could not discover account IDs; falling back to unscoped orders request");
-        const response = await this.request("GET", url);
-        return response.data;
-      }
-
-      const accountResults: Array<{ accountId: string; data: unknown }> = [];
-      const orders: unknown[] = [];
-      for (const id of accountIds) {
-        const response = await this.request("GET", url, { params: { accountId: id } });
-        accountResults.push({ accountId: id, data: response.data });
-        orders.push(...this.extractOrders(response.data));
-      }
-      return { orders, accountResults };
-    } catch (error: unknown) {
-      Logger.error("Failed to get orders:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to retrieve orders. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to retrieve orders");
-    }
+    return getOrders(this, accountId);
   }
 
   async getAlerts(accountId: string): Promise<unknown> {
-    try {
-      Logger.log(`[ALERT] Getting alerts for account ${accountId}`);
-      const response = await this.request("GET", `/iserver/account/${accountId}/alerts`);
-      Logger.log("[ALERT] Get alerts response:", response.data);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("[ALERT] Failed to get alerts:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to get alerts. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to get alerts: " + (error instanceof Error ? error.message : String(error)));
-    }
+    return getAlerts(this, accountId);
   }
 
   async createAlert(accountId: string, alertRequest: unknown): Promise<unknown> {
-    try {
-      Logger.log(`[ALERT] Creating alert for account ${accountId}:`, alertRequest);
-      const response = await this.request("POST", `/iserver/account/${accountId}/alert`, { body: alertRequest });
-      Logger.log("[ALERT] Alert creation response:", response.data);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("[ALERT] Failed to create alert:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to create alerts. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to create alert: " + (error instanceof Error ? error.message : String(error)));
-    }
+    return createAlert(this, accountId, alertRequest);
   }
 
   async activateAlert(accountId: string, alertId: string): Promise<unknown> {
-    try {
-      Logger.log(`[ALERT] Activating alert ${alertId} for account ${accountId}`);
-      const response = await this.request("POST", `/iserver/account/${accountId}/alert/activate`, { body: { alertId } });
-      Logger.log("[ALERT] Alert activation response:", response.data);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("[ALERT] Failed to activate alert:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to activate alerts. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to activate alert: " + (error instanceof Error ? error.message : String(error)));
-    }
+    return activateAlert(this, accountId, alertId);
   }
 
   async deleteAlert(accountId: string, alertId: string): Promise<unknown> {
-    try {
-      Logger.log(`[ALERT] Deleting alert ${alertId} for account ${accountId}`);
-      const response = await this.request("DELETE", `/iserver/account/${accountId}/alert/${alertId}`);
-      Logger.log("[ALERT] Alert deletion response:", response.data);
-      return response.data;
-    } catch (error: unknown) {
-      Logger.error("[ALERT] Failed to delete alert:", error);
-      if (this.isAuthenticationError(error)) {
-        throw new AuthenticationError("Authentication required to delete alerts. Please authenticate with Interactive Brokers first.");
-      }
-      throw new Error("Failed to delete alert: " + (error instanceof Error ? error.message : String(error)));
-    }
+    return deleteAlert(this, accountId, alertId);
   }
 }
