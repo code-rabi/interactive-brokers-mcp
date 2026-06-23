@@ -17,42 +17,19 @@ import { getOptionChain, resolveOptionConid } from "./ib-client/options.js";
 import { placeOrder, confirmOrder, getOrderStatus, getOrders } from "./ib-client/orders.js";
 import { getAlerts, createAlert, activateAlert, deleteAlert } from "./ib-client/alerts.js";
 import {
-  type AccountEntry,
   type AuthStatusResponse,
-  type ContractLookupRequest,
   type ContractSearch,
-  type ContractSection,
   type IBClientConfig,
   type OptionContractInfo,
-  type OptionStrikesResponse,
-  type OrderConfirmation,
-  type OrderPayload,
   type OrderRequest,
-  type ResolvedContract,
   type TickleResponse,
-  AuthenticationError,
   SymbolNotFoundError,
 } from "./ib-client/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-export { AuthenticationError, SymbolNotFoundError };
-export type {
-  AccountEntry,
-  AuthStatusResponse,
-  ContractLookupRequest,
-  ContractSearch,
-  ContractSection,
-  IBClientConfig,
-  OptionContractInfo,
-  OptionStrikesResponse,
-  OrderConfirmation,
-  OrderPayload,
-  OrderRequest,
-  ResolvedContract,
-  TickleResponse,
-};
+export { SymbolNotFoundError };
 
 // ---------------------------------------------------------------------------
 // Client

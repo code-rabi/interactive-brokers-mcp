@@ -8,7 +8,7 @@ import {
   isAuthenticationError,
 } from "./types.js";
 
-export function matchesExchange(contract: ContractSearch | OptionContractInfo, exchange?: string): boolean {
+function matchesExchange(contract: ContractSearch | OptionContractInfo, exchange?: string): boolean {
   if (!exchange) return true;
 
   const target = exchange.toUpperCase();

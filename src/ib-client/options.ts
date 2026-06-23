@@ -12,7 +12,7 @@ import {
   isAuthenticationError,
 } from "./types.js";
 
-export function getOptionMonths(contract: ContractSearch): string[] {
+function getOptionMonths(contract: ContractSearch): string[] {
   const months = contract.sections
     ?.filter((section) => section.secType === "OPT" && typeof section.months === "string")
     .flatMap((section) => section.months!.split(";"))
@@ -22,7 +22,7 @@ export function getOptionMonths(contract: ContractSearch): string[] {
   return [...new Set(months)];
 }
 
-export function buildOptionStrikesUrl(underlyingConid: number, expiry: string, exchange?: string): string {
+function buildOptionStrikesUrl(underlyingConid: number, expiry: string, exchange?: string): string {
   const params = new URLSearchParams({
     conid: String(underlyingConid),
     secType: "OPT",
@@ -36,7 +36,7 @@ export function buildOptionStrikesUrl(underlyingConid: number, expiry: string, e
   return `/iserver/secdef/strikes?${params.toString()}`;
 }
 
-export function buildOptionInfoUrl(
+function buildOptionInfoUrl(
   underlyingConid: number,
   expiry: string,
   strike: number,
@@ -58,7 +58,7 @@ export function buildOptionInfoUrl(
   return `/iserver/secdef/info?${params.toString()}`;
 }
 
-export async function resolveUnderlyingContract(
+async function resolveUnderlyingContract(
   client: IBClientRequester,
   symbol: string,
   exchange?: string,
@@ -74,7 +74,7 @@ export async function resolveUnderlyingContract(
   };
 }
 
-export async function resolveOptionContract(
+async function resolveOptionContract(
   client: IBClientRequester,
   request: ContractLookupRequest,
 ): Promise<ResolvedContract> {
