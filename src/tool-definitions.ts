@@ -1,14 +1,13 @@
-// tool-definitions.ts
-import { z } from "zod";
+import z from "zod";
 
-// ── Zod Schemas ──────────────────────────────────────────────────────────────
-// Helper for tolerant number (allows "1", "1.5", or actual number for fractional shares)
 const IntegerOrStringIntegerZod = z.union([
   z.number().positive(),
-  z.string().regex(/^[0-9]+(\.[0-9]+)?$/).transform(val => parseFloat(val))
+  z.string().regex(/^[0-9]+(\.[0-9]+)?$/).transform((val) => parseFloat(val))
 ]);
 
-// Zod Raw Shapes (for server.tool() method)
+const SecurityTypeZod = z.enum(["STK", "OPT"]);
+const OptionRightZod = z.enum(["C", "P"]);
+
 export const AuthenticateZodShape = {
   confirm: z.literal(true)
 };
@@ -21,6 +20,19 @@ export const GetPositionsZodShape = {
   accountId: z.string()
 };
 
+export const GetOptionChainZodShape = {
+  symbol: z.string(),
+  exchange: z.string().optional()
+};
+
+export const ResolveOptionConidZodShape = {
+  symbol: z.string(),
+  expiry: z.string(),
+  strike: IntegerOrStringIntegerZod,
+  right: OptionRightZod,
+  exchange: z.string().optional()
+};
+
 export const GetMarketDataZodShape = {
   symbol: z.string(),
   exchange: z.string().optional()
@@ -28,7 +40,12 @@ export const GetMarketDataZodShape = {
 
 export const PlaceOrderZodShape = {
   accountId: z.string(),
-  symbol: z.string(),
+  symbol: z.string().optional(),
+  conid: IntegerOrStringIntegerZod.optional(),
+  secType: SecurityTypeZod.optional(),
+  expiry: z.string().optional(),
+  strike: IntegerOrStringIntegerZod.optional(),
+  right: OptionRightZod.optional(),
   action: z.enum(["BUY", "SELL"]),
   orderType: z.enum(["MKT", "LMT", "STP"]),
   quantity: IntegerOrStringIntegerZod,
@@ -73,15 +90,17 @@ export const CreateAlertZodShape = {
     sendMessage: z.number().optional(),
     tif: z.string().optional(),
     logicBind: z.string().optional(),
-    conditions: z.array(z.object({
-      conidex: z.string(),
-      type: z.string(),
-      operator: z.string(),
-      triggerMethod: z.string(),
-      value: z.string(),
-      logicBind: z.string().optional(),
-      timeZone: z.string().optional()
-    }))
+    conditions: z.array(
+      z.object({
+        conidex: z.string(),
+        type: z.string(),
+        operator: z.string(),
+        triggerMethod: z.string(),
+        value: z.string(),
+        logicBind: z.string().optional(),
+        timeZone: z.string().optional()
+      })
+    )
   })
 };
 
@@ -95,10 +114,9 @@ export const DeleteAlertZodShape = {
   alertId: z.string()
 };
 
-// Flex Query Zod Shapes
 export const GetFlexQueryZodShape = {
   queryId: z.string(),
-  queryName: z.string().optional(), // Optional friendly name for auto-saving
+  queryName: z.string().optional(),
   parseXml: z.boolean().optional().default(true)
 };
 
@@ -110,56 +128,88 @@ export const ForgetFlexQueryZodShape = {
   queryId: z.string()
 };
 
-// Full Zod Schemas (for validation if needed)
 const AuthenticateZodSchema = z.object(AuthenticateZodShape);
-
 const GetAccountInfoZodSchema = z.object(GetAccountInfoZodShape);
-
 export const GetPositionsZodSchema = z.object(GetPositionsZodShape);
-
+export const GetOptionChainZodSchema = z.object(GetOptionChainZodShape);
+export const ResolveOptionConidZodSchema = z.object(ResolveOptionConidZodShape);
 export const GetMarketDataZodSchema = z.object(GetMarketDataZodShape);
 
-export const PlaceOrderZodSchema = z.object(PlaceOrderZodShape).refine(
-  (data) => {
+export const PlaceOrderZodSchema = z
+  .object(PlaceOrderZodShape)
+  .superRefine((data, ctx) => {
     if (data.orderType === "LMT" && data.price === undefined) {
-      return false;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "LMT orders require price",
+        path: ["price"]
+      });
     }
+
     if (data.orderType === "STP" && data.stopPrice === undefined) {
-      return false;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "STP orders require stopPrice",
+        path: ["stopPrice"]
+      });
     }
-    return true;
-  },
-  {
-    message: "LMT orders require price, STP orders require stopPrice",
-    path: ["price", "stopPrice"]
-  }
-);
+
+    if (!data.symbol && data.conid === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Either symbol or conid is required",
+        path: ["symbol"]
+      });
+    }
+
+    if (data.secType === "OPT" && data.conid === undefined) {
+      if (!data.symbol) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "OPT orders without conid require symbol",
+          path: ["symbol"]
+        });
+      }
+      if (!data.expiry) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "OPT orders without conid require expiry",
+          path: ["expiry"]
+        });
+      }
+      if (data.strike === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "OPT orders without conid require strike",
+          path: ["strike"]
+        });
+      }
+      if (!data.right) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "OPT orders without conid require right",
+          path: ["right"]
+        });
+      }
+    }
+  });
 
 export const GetOrderStatusZodSchema = z.object(GetOrderStatusZodShape);
-
 export const GetLiveOrdersZodSchema = z.object(GetLiveOrdersZodShape);
-
 export const ConfirmOrderZodSchema = z.object(ConfirmOrderZodShape);
-
-const GetAlertsZodSchema = z.object(GetAlertsZodShape);
-
+export const GetAlertsZodSchema = z.object(GetAlertsZodShape);
 export const CreateAlertZodSchema = z.object(CreateAlertZodShape);
-
 export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
-
 export const DeleteAlertZodSchema = z.object(DeleteAlertZodShape);
+export const GetFlexQueryZodSchema = z.object(GetFlexQueryZodShape);
+export const ListFlexQueriesZodSchema = z.object(ListFlexQueriesZodShape);
+export const ForgetFlexQueryZodSchema = z.object(ForgetFlexQueryZodShape);
 
-// Flex Query Full Schemas
-const GetFlexQueryZodSchema = z.object(GetFlexQueryZodShape);
-
-const ListFlexQueriesZodSchema = z.object(ListFlexQueriesZodShape);
-
-const ForgetFlexQueryZodSchema = z.object(ForgetFlexQueryZodShape);
-
-// ── TypeScript types (inferred from Zod schemas) ────────────────────────────
 export type AuthenticateInput = z.infer<typeof AuthenticateZodSchema>;
 export type GetAccountInfoInput = z.infer<typeof GetAccountInfoZodSchema>;
 export type GetPositionsInput = z.infer<typeof GetPositionsZodSchema>;
+export type GetOptionChainInput = z.infer<typeof GetOptionChainZodSchema>;
+export type ResolveOptionConidInput = z.infer<typeof ResolveOptionConidZodSchema>;
 export type GetMarketDataInput = z.infer<typeof GetMarketDataZodSchema>;
 export type PlaceOrderInput = z.infer<typeof PlaceOrderZodSchema>;
 export type GetOrderStatusInput = z.infer<typeof GetOrderStatusZodSchema>;

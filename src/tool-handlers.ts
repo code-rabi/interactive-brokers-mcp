@@ -9,6 +9,8 @@ import {
   AuthenticateInput,
   GetAccountInfoInput,
   GetPositionsInput,
+  GetOptionChainInput,
+  ResolveOptionConidInput,
   GetMarketDataInput,
   PlaceOrderInput,
   GetOrderStatusInput,
@@ -537,6 +539,66 @@ export class ToolHandlers {
     }
   }
 
+  async getOptionChain(input: GetOptionChainInput): Promise<ToolHandlerResult> {
+    const auth = await this.ensureAuth();
+    if (!auth.ok) {
+      return auth.result;
+    }
+    try {
+      const result = await this.context.ibClient.getOptionChain(input.symbol, input.exchange);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: this.formatError(error),
+          },
+        ],
+      };
+    }
+  }
+
+  async resolveOptionConid(input: ResolveOptionConidInput): Promise<ToolHandlerResult> {
+    const auth = await this.ensureAuth();
+    if (!auth.ok) {
+      return auth.result;
+    }
+    try {
+      const result = await this.context.ibClient.resolveOptionConid(
+        input.symbol,
+        input.expiry,
+        input.strike,
+        input.right,
+        input.exchange,
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: this.formatError(error),
+          },
+        ],
+      };
+    }
+  }
+
   async placeOrder(input: PlaceOrderInput): Promise<ToolHandlerResult> {
     const auth = await this.ensureAuth();
     if (!auth.ok) {
@@ -546,6 +608,11 @@ export class ToolHandlers {
       const result = await this.context.ibClient.placeOrder({
         accountId: input.accountId,
         symbol: input.symbol,
+        conid: input.conid,
+        secType: input.secType,
+        expiry: input.expiry,
+        strike: input.strike,
+        right: input.right,
         action: input.action,
         orderType: input.orderType,
         quantity: input.quantity, // Already converted by Zod schema

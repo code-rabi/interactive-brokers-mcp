@@ -547,4 +547,74 @@ describe('ToolHandlers', () => {
       });
     });
   });
+
+  describe('Option tools', () => {
+    it('should return option chain data', async () => {
+      const mockChain = {
+        symbol: 'AAPL',
+        underlyingConid: 265598,
+        expirations: [{ expiry: 'JAN27', call: [200], put: [200] }],
+      };
+      mockIBClient.getOptionChain = vi.fn().mockResolvedValue(mockChain);
+
+      const result = await handlers.getOptionChain({ symbol: 'AAPL', exchange: 'SMART' });
+
+      expect(mockIBClient.getOptionChain).toHaveBeenCalledWith('AAPL', 'SMART');
+      expect(result.content[0].text).toContain('"underlyingConid": 265598');
+    });
+
+    it('should resolve option conids', async () => {
+      const mockResolution = {
+        symbol: 'AAPL',
+        underlyingConid: 265598,
+        option: { conid: 912345678, right: 'C', strike: 200 },
+      };
+      mockIBClient.resolveOptionConid = vi.fn().mockResolvedValue(mockResolution);
+
+      const result = await handlers.resolveOptionConid({
+        symbol: 'AAPL',
+        expiry: 'JAN27',
+        strike: 200,
+        right: 'C',
+        exchange: 'SMART',
+      });
+
+      expect(mockIBClient.resolveOptionConid).toHaveBeenCalledWith(
+        'AAPL',
+        'JAN27',
+        200,
+        'C',
+        'SMART',
+      );
+      expect(result.content[0].text).toContain('"conid": 912345678');
+    });
+
+    it('should pass option order fields through to the IB client', async () => {
+      mockIBClient.placeOrder = vi.fn().mockResolvedValue({ orderId: '123', status: 'Submitted' });
+
+      await handlers.placeOrder({
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        secType: 'OPT',
+        expiry: 'JAN27',
+        strike: 200,
+        right: 'C',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 1,
+        price: 4.5,
+      });
+
+      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          symbol: 'AAPL',
+          secType: 'OPT',
+          expiry: 'JAN27',
+          strike: 200,
+          right: 'C',
+          price: 4.5,
+        }),
+      );
+    });
+  });
 });

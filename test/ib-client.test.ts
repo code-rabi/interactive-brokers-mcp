@@ -751,3 +751,144 @@ describe('IBClient', () => {
     });
   });
 });
+
+describe('Option contract support', () => {
+  let optionClient: IBClient;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', mockFetch);
+    mockFetch.mockResolvedValue(mockResponse({}));
+    mockFs.existsSync.mockImplementation((target: unknown) => String(target).endsWith('scripts/tickler.js'));
+    mockSpawn.mockReturnValue({
+      pid: 12345,
+      unref: vi.fn(),
+      killed: false,
+    });
+    optionClient = new IBClient({ host: 'localhost', port: 5000 });
+    (optionClient as any).isAuthenticated = true;
+  });
+
+  afterEach(() => {
+    optionClient.destroy();
+  });
+
+  it('should fetch option chains from secdef search and strikes endpoints', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse([
+          {
+            conid: 265598,
+            symbol: 'AAPL',
+            sections: [{ secType: 'OPT', months: 'JAN27;FEB27' }],
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(mockResponse({ call: [200, 205], put: [200, 205] }))
+      .mockResolvedValueOnce(mockResponse({ call: [210], put: [210] }));
+
+    const result = await optionClient.getOptionChain('AAPL', 'SMART');
+
+    expect(result).toEqual({
+      symbol: 'AAPL',
+      underlyingConid: 265598,
+      expirations: [
+        { expiry: 'JAN27', call: [200, 205], put: [200, 205] },
+        { expiry: 'FEB27', call: [210], put: [210] },
+      ],
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/iserver/secdef/strikes?conid=265598&secType=OPT&month=JAN27&exchange=SMART'),
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('should resolve option conids via secdef info', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+      .mockResolvedValueOnce(
+        mockResponse([
+          {
+            conid: 912345678,
+            symbol: 'AAPL',
+            secType: 'OPT',
+            right: 'C',
+            strike: 200,
+            multiplier: '100',
+          },
+        ]),
+      );
+
+    const result = await optionClient.resolveOptionConid('AAPL', 'JAN27', 200, 'C');
+
+    expect(result.underlyingConid).toBe(265598);
+    expect(result.option).toEqual(
+      expect.objectContaining({
+        conid: 912345678,
+        secType: 'OPT',
+        right: 'C',
+        strike: 200,
+      }),
+    );
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/iserver/secdef/info?conid=265598&secType=OPT&month=JAN27&strike=200&right=C'),
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
+  it('should place option orders after resolving the option contract', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+      .mockResolvedValueOnce(mockResponse([{ conid: 912345678, symbol: 'AAPL', secType: 'OPT' }]))
+      .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
+
+    await optionClient.placeOrder({
+      accountId: 'U12345',
+      symbol: 'AAPL',
+      secType: 'OPT',
+      expiry: 'JAN27',
+      strike: 200,
+      right: 'C',
+      action: 'BUY',
+      orderType: 'LMT',
+      quantity: 2,
+      price: 4.5,
+    });
+
+    const body = findCallBody('/iserver/account/U12345/orders');
+    expect(body.orders[0]).toEqual(
+      expect.objectContaining({
+        conid: 912345678,
+        secType: 'OPT',
+        side: 'BUY',
+        orderType: 'LMT',
+        quantity: 2,
+        price: 4.5,
+      }),
+    );
+  });
+
+  it('should place option orders with a pre-resolved conid', async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
+
+    await optionClient.placeOrder({
+      accountId: 'U12345',
+      conid: 912345678,
+      secType: 'OPT',
+      action: 'SELL',
+      orderType: 'MKT',
+      quantity: 1,
+    });
+
+    const body = findCallBody('/iserver/account/U12345/orders');
+    expect(body.orders[0]).toEqual(
+      expect.objectContaining({
+        conid: 912345678,
+        secType: 'OPT',
+        side: 'SELL',
+        orderType: 'MKT',
+        quantity: 1,
+      }),
+    );
+  });
+});
