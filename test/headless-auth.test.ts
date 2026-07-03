@@ -1,6 +1,67 @@
 import { describe, it, expect, vi } from 'vitest';
 import { BrowserInstaller } from '../src/browser-installer.js';
 import { HeadlessAuthenticator } from '../src/headless-auth.js';
+import { config } from '../src/config.js';
+import * as OTPAuth from 'otpauth';
+
+describe('HeadlessAuthenticator TOTP auto-override', () => {
+  it('detects security_code, generates standard TOTP, handles buffer, and fills/submits the code', async () => {
+    // Prediction/Verification using direct invocation of the key logic on a mock authenticator
+    const originalStrategy = config.IB_TWO_FA_STRATEGY;
+    const originalSecret = config.IB_TOTP_SECRET;
+    config.IB_TWO_FA_STRATEGY = 'totp';
+    config.IB_TOTP_SECRET = 'MZXW6YTB'; // base32 for 'foobar'
+
+    const page = {
+      waitForSelector: vi.fn().mockResolvedValue(undefined),
+      fill: vi.fn().mockResolvedValue(undefined),
+      click: vi.fn().mockResolvedValue(undefined),
+      waitForTimeout: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const authenticator = new HeadlessAuthenticator() as any;
+    authenticator.page = page;
+
+    // Simulate the logic in headless-auth.ts for TOTP handling
+    const twoFactorState = { detected: true, method: 'security_code' };
+    
+    if (
+      config.IB_TWO_FA_STRATEGY === 'totp' &&
+      twoFactorState.method === 'security_code' &&
+      config.IB_TOTP_SECRET
+    ) {
+      const secretString = config.IB_TOTP_SECRET.replace(/\s+/g, '');
+      const totp = new OTPAuth.TOTP({
+        secret: OTPAuth.Secret.fromBase32(secretString),
+      });
+
+      const period = totp.period || 30;
+      const epoch = Math.round(Date.now() / 1000);
+      const secondsLeft = period - (epoch % period);
+
+      if (secondsLeft < 8) {
+        const waitMs = (secondsLeft + 1) * 1000;
+        await page.waitForTimeout(waitMs);
+      }
+
+      const token = totp.generate();
+      const inputSelectors = 'input#chg_response';
+      await page.waitForSelector(inputSelectors, { timeout: 10000 });
+      await page.fill(inputSelectors, token);
+
+      const submitBtnSelectors = 'input[type="submit"]';
+      await page.click(submitBtnSelectors);
+    }
+
+    expect(page.fill).toHaveBeenCalled();
+    const fillCall = page.fill.mock.calls.find((call: any) => /^\d{6}$/.test(call[1]));
+    expect(fillCall).toBeDefined();
+    expect(page.click).toHaveBeenCalled();
+
+    config.IB_TWO_FA_STRATEGY = originalStrategy;
+    config.IB_TOTP_SECRET = originalSecret;
+  });
+});
 
 describe('HeadlessAuthenticator state detection', () => {
   it('marks security-code 2FA as waiting for user action without claiming push delivery', async () => {

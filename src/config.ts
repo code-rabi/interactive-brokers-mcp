@@ -24,6 +24,10 @@ export const config = {
   // Read-only mode configuration
   IB_READ_ONLY_MODE: process.env.IB_READ_ONLY_MODE === "true",
 
+  // 2FA TOTP configuration
+  IB_TWO_FA_STRATEGY: process.env.IB_TWO_FA_STRATEGY || "manual",
+  IB_TOTP_SECRET: process.env.IB_TOTP_SECRET || "",
+
   // Flex Query configuration
   IB_FLEX_TOKEN: process.env.IB_FLEX_TOKEN || "",
 

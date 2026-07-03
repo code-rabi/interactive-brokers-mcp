@@ -2,6 +2,8 @@ import { chromium, Browser, Page } from 'playwright-core';
 import { Logger } from './logger.js';
 import { IBClient } from './ib-client.js';
 import { BrowserInstaller } from './browser-installer.js';
+import { config } from './config.js';
+import * as OTPAuth from 'otpauth';
 
 export interface HeadlessAuthConfig {
   url: string;
@@ -258,6 +260,69 @@ export class HeadlessAuthenticator {
 
           if (twoFactorState.detected) {
             Logger.info(`🔐 ${twoFactorState.message} - continuing to wait...`);
+
+            // Check if TOTP auto-override strategy is configured and we have a security_code challenge
+            if (
+              config.IB_TWO_FA_STRATEGY === 'totp' &&
+              twoFactorState.method === 'security_code' &&
+              config.IB_TOTP_SECRET
+            ) {
+              try {
+                Logger.info('🔑 TOTP strategy enabled. Attempting to generate and submit TOTP code...');
+
+                // Parse standard TOTP secret (removing spaces if any)
+                const secretString = config.IB_TOTP_SECRET.replace(/\s+/g, '');
+                const totp = new OTPAuth.TOTP({
+                  secret: OTPAuth.Secret.fromBase32(secretString),
+                });
+
+                // Check time remaining in current 30s window
+                const period = totp.period || 30;
+                const epoch = Math.round(Date.now() / 1000);
+                const secondsLeft = period - (epoch % period);
+
+                Logger.info(`⏳ Seconds remaining for current TOTP code: ${secondsLeft}s`);
+
+                if (secondsLeft < 8) {
+                  const waitMs = (secondsLeft + 1) * 1000;
+                  Logger.info(`⚠️ Less than 8 seconds left (${secondsLeft}s). Waiting ${waitMs}ms for the next window...`);
+                  await this.page.waitForTimeout(waitMs);
+                }
+
+                // Generate token
+                const token = totp.generate();
+                Logger.info('🔑 Generated 6-digit TOTP token successfully.');
+
+                // Look for security code input elements
+                const inputSelectors = [
+                  'input#chg_response',
+                  'input[name="chg_response"]',
+                  'input[name="response"]',
+                  'input[type="text"]:not([name="username"]):not([name="user"])',
+                  'input[id="security_code"]',
+                  'input[name="security_code"]',
+                ].join(', ');
+
+                await this.page.waitForSelector(inputSelectors, { timeout: 10000 });
+                await this.page.fill(inputSelectors, token);
+                Logger.info('✅ Security code input filled.');
+
+                // Submit code
+                const submitBtnSelectors = [
+                  'input[type="submit"]',
+                  'button[type="submit"]',
+                  'button#submitForm',
+                  'button',
+                ].join(', ');
+                await this.page.click(submitBtnSelectors);
+                Logger.info('🚀 Clicked submit for security code.');
+
+                // Wait a moment for submission to register
+                await this.page.waitForTimeout(2000);
+              } catch (totpError) {
+                Logger.error('❌ Failed to auto-submit TOTP code:', totpError);
+              }
+            }
           } else {
             Logger.info(`🔍 Still waiting for authentication completion... (${Math.round((Date.now() - startTime) / 1000)}s elapsed)`);
           }
