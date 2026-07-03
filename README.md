@@ -24,7 +24,7 @@ your IB account to retrieve market data, check positions, and place trades.
 
 - **Interactive Brokers API Integration**: Full trading capabilities including account management, position tracking, real-time market data, and order management (market, limit, and stop orders)
 - **Flex Query Support**: Execute Flex Queries to retrieve account statements, trade confirmations, and historical data. Queries are automatically remembered for easy reuse
-- **Flexible Authentication**: Choose between browser-based OAuth authentication or headless mode with credentials for automated environments
+- **Flexible Authentication**: Choose between browser-based OAuth authentication or headless mode with credentials for automated environments, including fully automated TOTP 2FA override. See [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for detailed configuration and important risk warnings.
 - **Simple Setup**: Run directly with `npx` - no Docker or additional installations required. Includes pre-configured IB Gateway and Java runtime for all platforms
 
 ## Security Notice
@@ -192,6 +192,8 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Force standalone bundled gateway | `IB_FORCE_STANDALONE_GATEWAY` | N/A |
 | Flex Token | `IB_FLEX_TOKEN` | N/A |
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |
+| 2FA Strategy | `IB_TWO_FA_STRATEGY` | N/A |
+| TOTP Secret Key | `IB_TOTP_SECRET` | N/A |
 
 ## Gateway Lifecycle
 
