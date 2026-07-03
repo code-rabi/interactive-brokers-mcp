@@ -2,6 +2,18 @@ import { chromium, Browser, Page } from 'playwright-core';
 import { Logger } from './logger.js';
 import { IBClient } from './ib-client.js';
 import { BrowserInstaller } from './browser-installer.js';
+import { TotpChallengeHandler } from './totp-strategy.js';
+
+// Optional overrides for the CSS selectors used to automate the IBKR login
+// page, for when IBKR changes its markup. Each value is a comma-separated
+// CSS selector list; unset fields fall back to the built-in defaults.
+export interface AuthSelectorOverrides {
+  username?: string;
+  password?: string;
+  loginSubmit?: string;
+  totpInput?: string;
+  totpSubmit?: string;
+}
 
 export interface HeadlessAuthConfig {
   url: string;
@@ -10,6 +22,9 @@ export interface HeadlessAuthConfig {
   timeout?: number;
   ibClient?: IBClient;
   paperTrading?: boolean;
+  twoFaStrategy?: string;
+  totpSecret?: string;
+  selectors?: AuthSelectorOverrides;
 }
 
 interface HeadlessAuthResult {
@@ -73,24 +88,25 @@ export class HeadlessAuthenticator {
       Logger.info(`🌐 Navigating to ${authConfig.url}...`);
       await this.page.goto(authConfig.url, { waitUntil: 'networkidle' });
 
-      // Wait for login form to be visible
-      Logger.info('⏳ Waiting for login form...');
-      await this.page.waitForSelector('input[name="user"], input[id="user"], input[type="text"]', { timeout: 30000 });
-
       // IBKR periodically changes exact login field names. Prefer the current
       // stable ids/names, then fall back to a visible text input.
-      const usernameSelector = [
+      const usernameSelector = authConfig.selectors?.username || [
         'input#xyz-field-username',
         'input[name="username"]',
         'input[name="user"]',
         'input[id="user"]',
         'input[type="text"]:visible',
       ].join(', ');
+
+      // Wait for login form to be visible
+      Logger.info('⏳ Waiting for login form...');
+      await this.page.waitForSelector(usernameSelector, { timeout: 30000 });
+
       await this.page.fill(usernameSelector, authConfig.username);
       Logger.info('✅ Username filled');
 
       // Find and fill password field
-      const passwordSelector = [
+      const passwordSelector = authConfig.selectors?.password || [
         'input#xyz-field-password',
         'input[name="password"]',
         'input[id="password"]',
@@ -135,13 +151,25 @@ export class HeadlessAuthenticator {
       }
 
       // Look for submit button and click it
-      const submitSelector = 'input[type="submit"], button[type="submit"], button';
-      
+      const submitSelector =
+        authConfig.selectors?.loginSubmit || 'input[type="submit"], button[type="submit"], button';
+
       Logger.info('🔄 Submitting login form...');
       await this.page.click(submitSelector);
 
       // Indicate that credentials form was filled and successfully submitted
       let credentialsSubmitted = true;
+
+      // TOTP auto-override: build the challenge handler once so its attempt
+      // budget spans the whole polling loop below.
+      const totpHandler =
+        authConfig.twoFaStrategy === 'totp' && authConfig.totpSecret
+          ? new TotpChallengeHandler({
+              secret: authConfig.totpSecret,
+              inputSelector: authConfig.selectors?.totpInput,
+              submitSelector: authConfig.selectors?.totpSubmit,
+            })
+          : null;
 
       // Wait for the authentication process to complete using IB client polling
       Logger.info('⏳ Waiting for authentication to complete...');
@@ -258,6 +286,27 @@ export class HeadlessAuthenticator {
 
           if (twoFactorState.detected) {
             Logger.info(`🔐 ${twoFactorState.message} - continuing to wait...`);
+
+            if (totpHandler && twoFactorState.method === 'security_code') {
+              if (totpHandler.exhausted) {
+                // IBKR permanently locks accounts after repeated 2FA failures;
+                // stop instead of resubmitting codes for the rest of the timeout.
+                Logger.warn('❌ IBKR is still asking for a security code after the maximum number of TOTP submissions; stopping to avoid an account lockout.');
+                await this.cleanup();
+                return {
+                  success: false,
+                  status: 'AUTH_FAILED',
+                  message: 'IBKR kept requesting a security code after the maximum number of automated TOTP submissions.',
+                  error: 'TOTP codes were not accepted - verify IB_TOTP_SECRET and that the system clock is synchronized (NTP)',
+                };
+              }
+
+              try {
+                await totpHandler.submitCode(this.page);
+              } catch (totpError) {
+                Logger.error('❌ Failed to auto-submit TOTP code:', totpError);
+              }
+            }
           } else {
             Logger.info(`🔍 Still waiting for authentication completion... (${Math.round((Date.now() - startTime) / 1000)}s elapsed)`);
           }

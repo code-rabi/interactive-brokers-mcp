@@ -1,6 +1,138 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BrowserInstaller } from '../src/browser-installer.js';
 import { HeadlessAuthenticator } from '../src/headless-auth.js';
+import * as OTPAuth from 'otpauth';
+import {
+  TotpChallengeHandler,
+  DEFAULT_TOTP_INPUT_SELECTOR,
+  DEFAULT_TOTP_SUBMIT_SELECTOR,
+} from '../src/totp-strategy.js';
+
+const TEST_SECRET = 'MZXW6YTB'; // base32 for 'foobar'
+
+// Epoch chosen so 25s remain in the 30s TOTP window (no pre-submit wait).
+const MID_WINDOW_MS = 999_999_995_000;
+// Epoch chosen so only 2s remain in the window (forces a wait for the next one).
+const WINDOW_EDGE_MS = 1_000_000_018_000;
+
+function expectedTokenAt(timestampMs: number): string {
+  return new OTPAuth.TOTP({
+    secret: OTPAuth.Secret.fromBase32(TEST_SECRET),
+  }).generate({ timestamp: timestampMs });
+}
+
+function createMockPage() {
+  const elements = new Map<string, any>();
+  const page = {
+    locator: vi.fn((selector: string) => ({
+      first: () => {
+        if (!elements.has(selector)) {
+          elements.set(selector, {
+            waitFor: vi.fn().mockResolvedValue(undefined),
+            fill: vi.fn().mockResolvedValue(undefined),
+            click: vi.fn().mockResolvedValue(undefined),
+          });
+        }
+        return elements.get(selector);
+      },
+    })),
+    // Advance the fake clock so window arithmetic behaves like real time.
+    waitForTimeout: vi.fn(async (ms: number) => {
+      vi.advanceTimersByTime(ms);
+    }),
+  };
+  return { page: page as any, elements };
+}
+
+describe('TotpChallengeHandler', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(MID_WINDOW_MS));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fills the security-code input with the exact TOTP and submits it', async () => {
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({ secret: TEST_SECRET });
+    const token = expectedTokenAt(MID_WINDOW_MS);
+
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+
+    const input = elements.get(DEFAULT_TOTP_INPUT_SELECTOR);
+    expect(input.waitFor).toHaveBeenCalledWith({ state: 'visible', timeout: 10000 });
+    expect(input.fill).toHaveBeenCalledWith(token);
+    expect(elements.get(DEFAULT_TOTP_SUBMIT_SELECTOR).click).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the next window instead of submitting a code that is about to expire', async () => {
+    vi.setSystemTime(new Date(WINDOW_EDGE_MS));
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({ secret: TEST_SECRET });
+
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+
+    // 2s were left, so the handler waits (2 + 1)s into the next window and
+    // generates the token for that window.
+    expect(page.waitForTimeout).toHaveBeenCalledWith(3000);
+    expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR).fill).toHaveBeenCalledWith(
+      expectedTokenAt(WINDOW_EDGE_MS + 3000),
+    );
+  });
+
+  it('does not resubmit within the same TOTP window', async () => {
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({ secret: TEST_SECRET });
+
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+    await expect(handler.submitCode(page)).resolves.toBe(false);
+
+    expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR).fill).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops submitting once the attempt budget is spent', async () => {
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({ secret: TEST_SECRET, maxAttempts: 2 });
+
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+    expect(handler.exhausted).toBe(false);
+
+    vi.advanceTimersByTime(30_000); // move to the next TOTP window
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+    expect(handler.exhausted).toBe(true);
+
+    vi.advanceTimersByTime(30_000);
+    await expect(handler.submitCode(page)).resolves.toBe(false);
+    expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR).fill).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts base32 secrets containing spaces', async () => {
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({ secret: 'MZXW 6YTB' });
+
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+
+    expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR).fill).toHaveBeenCalledWith(
+      expectedTokenAt(MID_WINDOW_MS),
+    );
+  });
+
+  it('honors selector overrides for the input and submit controls', async () => {
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({
+      secret: TEST_SECRET,
+      inputSelector: '#custom-code-input',
+      submitSelector: '#custom-submit',
+    });
+
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+
+    expect(elements.get('#custom-code-input').fill).toHaveBeenCalledTimes(1);
+    expect(elements.get('#custom-submit').click).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('HeadlessAuthenticator state detection', () => {
   it('marks security-code 2FA as waiting for user action without claiming push delivery', async () => {
