@@ -28,6 +28,15 @@ export const config = {
   IB_TWO_FA_STRATEGY: process.env.IB_TWO_FA_STRATEGY || "manual",
   IB_TOTP_SECRET: process.env.IB_TOTP_SECRET || "",
 
+  // Optional overrides for the CSS selectors used to automate the IBKR login
+  // page (comma-separated selector lists), for when IBKR changes its markup.
+  // Defaults live in headless-auth.ts and totp-strategy.ts.
+  IB_SELECTOR_USERNAME: process.env.IB_SELECTOR_USERNAME || "",
+  IB_SELECTOR_PASSWORD: process.env.IB_SELECTOR_PASSWORD || "",
+  IB_SELECTOR_LOGIN_SUBMIT: process.env.IB_SELECTOR_LOGIN_SUBMIT || "",
+  IB_SELECTOR_TOTP_INPUT: process.env.IB_SELECTOR_TOTP_INPUT || "",
+  IB_SELECTOR_TOTP_SUBMIT: process.env.IB_SELECTOR_TOTP_SUBMIT || "",
+
   // Flex Query configuration
   IB_FLEX_TOKEN: process.env.IB_FLEX_TOKEN || "",
 

@@ -194,6 +194,10 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |
 | 2FA Strategy | `IB_TWO_FA_STRATEGY` | N/A |
 | TOTP Secret Key | `IB_TOTP_SECRET` | N/A |
+| Login page selector overrides | `IB_SELECTOR_USERNAME`, `IB_SELECTOR_PASSWORD`, `IB_SELECTOR_LOGIN_SUBMIT` | N/A |
+| TOTP form selector overrides | `IB_SELECTOR_TOTP_INPUT`, `IB_SELECTOR_TOTP_SUBMIT` | N/A |
+
+See the [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for details on the 2FA and selector-override variables.
 
 ## Gateway Lifecycle
 

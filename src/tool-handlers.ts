@@ -92,6 +92,27 @@ export class ToolHandlers {
     return `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
   }
 
+  private buildHeadlessAuthConfig(url: string, timeoutMs: number): HeadlessAuthConfig {
+    const config = this.context.config;
+    return {
+      url,
+      username: config.IB_USERNAME,
+      password: config.IB_PASSWORD_AUTH,
+      timeout: timeoutMs,
+      ibClient: this.context.ibClient,
+      paperTrading: config.IB_PAPER_TRADING,
+      twoFaStrategy: config.IB_TWO_FA_STRATEGY,
+      totpSecret: config.IB_TOTP_SECRET,
+      selectors: {
+        username: config.IB_SELECTOR_USERNAME || undefined,
+        password: config.IB_SELECTOR_PASSWORD || undefined,
+        loginSubmit: config.IB_SELECTOR_LOGIN_SUBMIT || undefined,
+        totpInput: config.IB_SELECTOR_TOTP_INPUT || undefined,
+        totpSubmit: config.IB_SELECTOR_TOTP_SUBMIT || undefined,
+      },
+    };
+  }
+
   private textResult(text: string): ToolHandlerResult {
     return {
       content: [
@@ -168,14 +189,7 @@ export class ToolHandlers {
     // Trigger headless authentication once, but don't wait for the promise here.
     // The promise is handled to log results, but the primary flow control is the polling loop.
     const authUrl = this.buildAuthUrl();
-    const authConfig: HeadlessAuthConfig = {
-      url: authUrl,
-      username: this.context.config.IB_USERNAME,
-      password: this.context.config.IB_PASSWORD_AUTH,
-      timeout: timeoutSeconds * 1000, // authenticator timeout in ms
-      ibClient: this.context.ibClient,
-      paperTrading: this.context.config.IB_PAPER_TRADING,
-    };
+    const authConfig = this.buildHeadlessAuthConfig(authUrl, timeoutSeconds * 1000);
 
     const authenticator = new HeadlessAuthenticator();
     // Fire-and-forget the auth trigger, but handle its completion for logging/cleanup
@@ -307,14 +321,7 @@ export class ToolHandlers {
       if (this.context.config.IB_HEADLESS_MODE) {
         try {
           // Use headless authentication
-          const authConfig: HeadlessAuthConfig = {
-            url: authUrl,
-            username: this.context.config.IB_USERNAME,
-            password: this.context.config.IB_PASSWORD_AUTH,
-            timeout: this.context.config.IB_AUTH_TIMEOUT,
-            ibClient: this.context.ibClient,
-            paperTrading: this.context.config.IB_PAPER_TRADING,
-          };
+          const authConfig = this.buildHeadlessAuthConfig(authUrl, this.context.config.IB_AUTH_TIMEOUT);
 
           // Validate that we have credentials for headless mode
           if (!authConfig.username || !authConfig.password) {
