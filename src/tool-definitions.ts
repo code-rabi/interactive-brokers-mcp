@@ -197,10 +197,12 @@ export const PlaceOrderZodSchema = z
 export const GetOrderStatusZodSchema = z.object(GetOrderStatusZodShape);
 export const GetLiveOrdersZodSchema = z.object(GetLiveOrdersZodShape);
 export const ConfirmOrderZodSchema = z.object(ConfirmOrderZodShape);
+// GetAlertsZodSchema is used by tests/exports and is exported
 export const GetAlertsZodSchema = z.object(GetAlertsZodShape);
 export const CreateAlertZodSchema = z.object(CreateAlertZodShape);
 export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
 export const DeleteAlertZodSchema = z.object(DeleteAlertZodShape);
+// GetFlexQueryZodSchema, ListFlexQueriesZodSchema, ForgetFlexQueryZodSchema are used by tests/exports and are exported
 export const GetFlexQueryZodSchema = z.object(GetFlexQueryZodShape);
 export const ListFlexQueriesZodSchema = z.object(ListFlexQueriesZodShape);
 export const ForgetFlexQueryZodSchema = z.object(ForgetFlexQueryZodShape);
