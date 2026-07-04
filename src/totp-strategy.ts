@@ -119,8 +119,8 @@ export class TotpChallengeHandler {
 
     Logger.info(`🔐 Selecting second-factor device "${authenticatorLabel}"...`);
     await select.selectOption({ label: authenticatorLabel });
-    // Let the widget render the security-code field before we look for it.
-    await page.waitForTimeout(1000);
+    // No sleep needed: submitCode() waits for the security-code input to become
+    // visible before filling it, which covers the widget's render time.
     return true;
   }
 
@@ -163,17 +163,22 @@ export class TotpChallengeHandler {
       return false;
     }
 
+    // Locate and wait for the visible code input before committing an attempt.
+    // If it never appears (e.g. the chooser had no authenticator option, or the
+    // widget failed to render), this throws without consuming the attempt
+    // budget, so the caller can retry on a later poll instead of the handler
+    // becoming `exhausted` having never submitted a code.
+    // The credentials form leaves hidden response inputs and login buttons in
+    // the DOM, so scope to visible elements to avoid filling/clicking a hidden one.
+    const input = page.locator(this.inputSelector).filter({ visible: true }).first();
+    await input.waitFor({ state: 'visible', timeout: 10000 });
+
     this.lastAttemptWindow = this.currentWindow();
     this.attempts += 1;
 
     const token = this.totp.generate();
     Logger.info(`🔑 Submitting TOTP security code (attempt ${this.attempts}/${this.maxAttempts})...`);
 
-    // The credentials form leaves hidden response inputs and login buttons in
-    // the DOM, so scope to visible elements to avoid filling/clicking a hidden
-    // one.
-    const input = page.locator(this.inputSelector).filter({ visible: true }).first();
-    await input.waitFor({ state: 'visible', timeout: 10000 });
     await input.fill(token);
     await page.locator(this.submitSelector).filter({ visible: true }).first().click();
     Logger.info('🚀 Security code filled and submitted.');

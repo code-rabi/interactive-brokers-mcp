@@ -121,6 +121,27 @@ describe('TotpChallengeHandler', () => {
     expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR).fill).toHaveBeenCalledTimes(2);
   });
 
+  it('does not consume an attempt when the code input never appears', async () => {
+    const { page, elements } = createMockPage();
+    const handler = new TotpChallengeHandler({ secret: TEST_SECRET, maxAttempts: 2 });
+
+    // Simulate the security-code field never rendering. Instantiate the locator
+    // first (the mock creates elements lazily), then make waitFor reject.
+    const input = page.locator(DEFAULT_TOTP_INPUT_SELECTOR);
+    input.waitFor = vi.fn().mockRejectedValue(new Error('timeout'));
+
+    await expect(handler.submitCode(page)).rejects.toThrow('timeout');
+    // The attempt budget is untouched, so the caller can retry on a later poll
+    // instead of the handler locking itself out having never submitted a code.
+    expect(handler.exhausted).toBe(false);
+    expect(input.fill).not.toHaveBeenCalled();
+
+    // Once the field appears, a submission still succeeds within the same window.
+    input.waitFor = vi.fn().mockResolvedValue(undefined);
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+    expect(input.fill).toHaveBeenCalledTimes(1);
+  });
+
   it('accepts base32 secrets containing spaces', async () => {
     const { page, elements } = createMockPage();
     const handler = new TotpChallengeHandler({ secret: 'MZXW 6YTB' });
