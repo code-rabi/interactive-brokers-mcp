@@ -109,6 +109,7 @@ export class ToolHandlers {
         loginSubmit: config.IB_SELECTOR_LOGIN_SUBMIT || undefined,
         totpInput: config.IB_SELECTOR_TOTP_INPUT || undefined,
         totpSubmit: config.IB_SELECTOR_TOTP_SUBMIT || undefined,
+        totpDeviceSelect: config.IB_SELECTOR_TOTP_DEVICE_SELECT || undefined,
       },
     };
   }

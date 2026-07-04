@@ -13,6 +13,7 @@ export interface AuthSelectorOverrides {
   loginSubmit?: string;
   totpInput?: string;
   totpSubmit?: string;
+  totpDeviceSelect?: string;
 }
 
 export interface HeadlessAuthConfig {
@@ -168,6 +169,7 @@ export class HeadlessAuthenticator {
               secret: authConfig.totpSecret,
               inputSelector: authConfig.selectors?.totpInput,
               submitSelector: authConfig.selectors?.totpSubmit,
+              deviceSelectSelector: authConfig.selectors?.totpDeviceSelect,
             })
           : null;
 
@@ -287,7 +289,13 @@ export class HeadlessAuthenticator {
           if (twoFactorState.detected) {
             Logger.info(`🔐 ${twoFactorState.message} - continuing to wait...`);
 
-            if (totpHandler && twoFactorState.method === 'security_code') {
+            // `factor_selection` is the multi-device chooser that precedes the
+            // security-code field; the handler selects the authenticator device
+            // and then submits, so drive it for both states.
+            if (
+              totpHandler &&
+              (twoFactorState.method === 'security_code' || twoFactorState.method === 'factor_selection')
+            ) {
               if (totpHandler.exhausted) {
                 // IBKR permanently locks accounts after repeated 2FA failures;
                 // stop instead of resubmitting codes for the rest of the timeout.
@@ -430,7 +438,12 @@ export class HeadlessAuthenticator {
       };
     }
 
-    if (text.includes('temporary security code') || text.includes('security code') || text.includes('response code')) {
+    if (
+      text.includes('temporary security code') ||
+      text.includes('security code') ||
+      text.includes('response code') ||
+      text.includes('authenticator app code')
+    ) {
       return {
         detected: true,
         method: 'security_code',
