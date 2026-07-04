@@ -6,6 +6,7 @@ import {
   TotpChallengeHandler,
   DEFAULT_TOTP_INPUT_SELECTOR,
   DEFAULT_TOTP_SUBMIT_SELECTOR,
+  DEFAULT_TOTP_DEVICE_SELECT_SELECTOR,
 } from '../src/totp-strategy.js';
 
 const TEST_SECRET = 'MZXW6YTB'; // base32 for 'foobar'
@@ -150,7 +151,7 @@ describe('TotpChallengeHandler', () => {
     });
     const page: any = {
       locator: vi.fn((selector: string) => {
-        if (selector === 'select') return selectMock;
+        if (selector === DEFAULT_TOTP_DEVICE_SELECT_SELECTOR) return selectMock;
         if (!elements.has(selector)) {
           const el = makeEl();
           elements.set(selector, { filter: vi.fn(() => ({ first: () => el })), first: () => el, _el: el });
