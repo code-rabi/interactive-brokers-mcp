@@ -36,6 +36,7 @@ export const config = {
   IB_SELECTOR_LOGIN_SUBMIT: process.env.IB_SELECTOR_LOGIN_SUBMIT || "",
   IB_SELECTOR_TOTP_INPUT: process.env.IB_SELECTOR_TOTP_INPUT || "",
   IB_SELECTOR_TOTP_SUBMIT: process.env.IB_SELECTOR_TOTP_SUBMIT || "",
+  IB_SELECTOR_TOTP_DEVICE_SELECT: process.env.IB_SELECTOR_TOTP_DEVICE_SELECT || "",
 
   // Flex Query configuration
   IB_FLEX_TOKEN: process.env.IB_FLEX_TOKEN || "",

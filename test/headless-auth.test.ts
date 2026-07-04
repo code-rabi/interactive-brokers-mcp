@@ -23,19 +23,31 @@ function expectedTokenAt(timestampMs: number): string {
 
 function createMockPage() {
   const elements = new Map<string, any>();
+  const makeLocator = (selector: string): any => {
+    if (!elements.has(selector)) {
+      // A single object per selector doubles as both the element (waitFor/fill/
+      // click) and the chainable locator (filter/first/count/...).
+      const locator: any = {
+        waitFor: vi.fn().mockResolvedValue(undefined),
+        fill: vi.fn().mockResolvedValue(undefined),
+        click: vi.fn().mockResolvedValue(undefined),
+        // `.filter({ visible: true })` and `.first()` are chainable no-ops.
+        filter: vi.fn(() => locator),
+        first: () => locator,
+        // No device chooser is present in the unit-test DOM, so the `select`
+        // locator reports zero matches and device selection is skipped.
+        count: vi.fn(async () => (selector === 'select' ? 0 : 1)),
+        locator: vi.fn(() => makeLocator(`${selector} option`)),
+        allTextContents: vi.fn(async () => []),
+        textContent: vi.fn(async () => null),
+        selectOption: vi.fn().mockResolvedValue(undefined),
+      };
+      elements.set(selector, locator);
+    }
+    return elements.get(selector);
+  };
   const page = {
-    locator: vi.fn((selector: string) => ({
-      first: () => {
-        if (!elements.has(selector)) {
-          elements.set(selector, {
-            waitFor: vi.fn().mockResolvedValue(undefined),
-            fill: vi.fn().mockResolvedValue(undefined),
-            click: vi.fn().mockResolvedValue(undefined),
-          });
-        }
-        return elements.get(selector);
-      },
-    })),
+    locator: vi.fn((selector: string) => makeLocator(selector)),
     // Advance the fake clock so window arithmetic behaves like real time.
     waitForTimeout: vi.fn(async (ms: number) => {
       vi.advanceTimersByTime(ms);
@@ -117,6 +129,45 @@ describe('TotpChallengeHandler', () => {
     expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR).fill).toHaveBeenCalledWith(
       expectedTokenAt(MID_WINDOW_MS),
     );
+  });
+
+  it('selects the authenticator device before filling the code when a chooser is shown', async () => {
+    const elements = new Map<string, any>();
+    const selectMock = {
+      filter: vi.fn(() => selectMock),
+      first: () => selectMock,
+      count: vi.fn(async () => 1),
+      selectOption: vi.fn().mockResolvedValue(undefined),
+      locator: vi.fn((sub: string) => ({
+        allTextContents: vi.fn(async () => ['Select Type', 'IB Key', 'Mobile Authenticator App']),
+        first: () => ({ textContent: vi.fn(async () => (sub === 'option:checked' ? 'Select Type' : null)) }),
+      })),
+    };
+    const makeEl = () => ({
+      waitFor: vi.fn().mockResolvedValue(undefined),
+      fill: vi.fn().mockResolvedValue(undefined),
+      click: vi.fn().mockResolvedValue(undefined),
+    });
+    const page: any = {
+      locator: vi.fn((selector: string) => {
+        if (selector === 'select') return selectMock;
+        if (!elements.has(selector)) {
+          const el = makeEl();
+          elements.set(selector, { filter: vi.fn(() => ({ first: () => el })), first: () => el, _el: el });
+        }
+        return elements.get(selector);
+      }),
+      waitForTimeout: vi.fn(async (ms: number) => vi.advanceTimersByTime(ms)),
+    };
+
+    const handler = new TotpChallengeHandler({ secret: TEST_SECRET });
+    await expect(handler.submitCode(page)).resolves.toBe(true);
+
+    expect(selectMock.selectOption).toHaveBeenCalledWith({ label: 'Mobile Authenticator App' });
+    expect(elements.get(DEFAULT_TOTP_INPUT_SELECTOR)._el.fill).toHaveBeenCalledWith(
+      expectedTokenAt(MID_WINDOW_MS),
+    );
+    expect(elements.get(DEFAULT_TOTP_SUBMIT_SELECTOR)._el.click).toHaveBeenCalledTimes(1);
   });
 
   it('honors selector overrides for the input and submit controls', async () => {
