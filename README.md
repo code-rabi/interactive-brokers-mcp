@@ -25,7 +25,7 @@ your IB account to retrieve market data, check positions, and place trades.
 - **Interactive Brokers API Integration**: Full trading capabilities including account management, position tracking, real-time market data, and order management (market, limit, and stop orders)
 - **Flex Query Support**: Execute Flex Queries to retrieve account statements, trade confirmations, and historical data. Queries are automatically remembered for easy reuse
 - **Flexible Authentication**: Choose between browser-based OAuth authentication or headless mode with credentials for automated environments, including fully automated TOTP 2FA override. See [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for detailed configuration and important risk warnings.
-- **Simple Setup**: Run directly with `npx` - no Docker or additional installations required. Includes pre-configured IB Gateway and Java runtime for all platforms
+- **Simple Setup**: Run directly with `npx` - no Docker or additional installations required. The IB Gateway and a Java runtime are fetched on first run from official vendor sources and verified before use
 
 ## Security Notice
 
@@ -40,19 +40,56 @@ your IB account to retrieve market data, check positions, and place trades.
 - **Not Financial Advice**: This tool is for automation only, not financial
   advice.
 
+> 📖 Read **[SECURITY.md](./SECURITY.md)** for the full security posture: how third‑party
+> dependencies are downloaded and verified, network exposure and gateway hardening, credential
+> handling, and how to report a vulnerability.
+
 ## Prerequisites
-
-**No additional installations required for mainstream platforms.** This package includes:
-
-- Pre-configured IB Gateway for all platforms (Linux, macOS, Windows)
-- Java Runtime Environment (JRE) for macOS, Windows, and standard Linux builds
-- Automatic first-run musl JRE download for Alpine-based containers (e.g. `node:lts-alpine`, supergateway)
-- All necessary dependencies
 
 You only need:
 
 - Interactive Brokers account (paper or live trading)
 - Node.js 18+ (for running the MCP server)
+- Network access on first run (to download the IB Gateway and Java runtime)
+
+> **v2 breaking change.** Starting with `v2.0.0` this package no longer bundles the IB Client
+> Portal Gateway or a Java runtime. They are downloaded on demand from official vendor sources,
+> verified, and cached locally (see [Dependency Resolution](#dependency-resolution-v2)). The first
+> run therefore requires network access and may take longer. If you need the previous fully-offline
+> behavior, pin to `interactive-brokers-mcp@1`, or pre-install the dependencies and disable downloads
+> (`IB_DOWNLOADS_DISABLED=true`).
+
+## Dependency Resolution (v2)
+
+On startup the server resolves two third-party dependencies — the IB Client Portal Gateway and a
+Java 11 runtime — in this order:
+
+1. **User-managed (preferred).** If you point the server at your own installs it uses them as-is:
+   - `IB_GATEWAY_DIR` — directory containing `clientportal.gw`
+   - `IB_JAVA_HOME` / `JAVA_HOME` — a Java 11+ home
+   - a system `java` on `PATH` (auto-adopted only for major versions 11–17)
+2. **Downloaded on demand.** Anything missing is fetched from an official, pinned source:
+   - **Java** — [BellSoft Liberica JRE 11](https://bell-sw.com/) (glibc and musl/Alpine builds)
+   - **IB Gateway** — the official Interactive Brokers HTTPS distribution
+3. **Verified before use.** Every artifact is checked against a pinned `sha256` recorded in
+   [`dependencies.manifest.json`](./dependencies.manifest.json). The IB Gateway is additionally
+   verified against the live MD5 that IB's CDN exposes in the `ETag` header, and is only ever
+   downloaded over HTTPS from the official IB host.
+4. **Cached and reused.** Verified artifacts are extracted into a per-user cache outside the package
+   directory (`~/.cache/interactive-brokers-mcp` on Linux/macOS, `%LOCALAPPDATA%` on Windows, or
+   `IB_CACHE_DIR`) and reused on subsequent runs.
+
+### Controlling downloads
+
+| Behavior | Variable | Notes |
+| --- | --- | --- |
+| Disable all downloads | `IB_DOWNLOADS_DISABLED=true` | Fails with a clear error if a dependency is missing. Use with `IB_GATEWAY_DIR` / `IB_JAVA_HOME`. |
+| Override the cache location | `IB_CACHE_DIR=/path` | Defaults to the platform cache directory. |
+| User-managed gateway | `IB_GATEWAY_DIR=/path` | Directory containing `clientportal.gw`. |
+| User-managed Java | `IB_JAVA_HOME=/path` | A Java 11+ home; always honored regardless of version. |
+| Proceed past a gateway checksum change | `IB_GATEWAY_ALLOW_UNVERIFIED=true` | IB ships a rolling "latest" gateway zip; if it rotates before the pinned `sha256` is updated, this lets you proceed. The live CDN `ETag` integrity check still runs. |
+
+Maintainers can regenerate the pinned manifest with `npm run manifest:update`.
 
 ## Quick Start
 
@@ -189,21 +226,27 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Auth Timeout | `IB_AUTH_TIMEOUT` | `--ib-auth-timeout` |
 | Auth Wait Seconds | `IB_AUTH_WAIT_SECONDS` | `--ib-auth-wait-seconds` |
 | Auth Poll Seconds | `IB_AUTH_POLL_SECONDS` | `--ib-auth-poll-seconds` |
-| Force standalone bundled gateway | `IB_FORCE_STANDALONE_GATEWAY` | N/A |
+| Force standalone managed gateway | `IB_FORCE_STANDALONE_GATEWAY` | N/A |
 | Flex Token | `IB_FLEX_TOKEN` | N/A |
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |
 | 2FA Strategy | `IB_TWO_FA_STRATEGY` | N/A |
 | TOTP Secret Key | `IB_TOTP_SECRET` | N/A |
 | Login page selector overrides | `IB_SELECTOR_USERNAME`, `IB_SELECTOR_PASSWORD`, `IB_SELECTOR_LOGIN_SUBMIT` | N/A |
 | TOTP form selector overrides | `IB_SELECTOR_TOTP_INPUT`, `IB_SELECTOR_TOTP_SUBMIT` | N/A |
+| Disable on-demand downloads | `IB_DOWNLOADS_DISABLED` | N/A |
+| Dependency cache directory | `IB_CACHE_DIR` | N/A |
+| User-managed gateway directory | `IB_GATEWAY_DIR` | N/A |
+| User-managed Java home | `IB_JAVA_HOME` / `JAVA_HOME` | N/A |
+| Allow unverified gateway (checksum rotated) | `IB_GATEWAY_ALLOW_UNVERIFIED` | N/A |
 
-See the [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for details on the 2FA and selector-override variables.
+See the [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for details on the 2FA and selector-override variables,
+and [Dependency Resolution](#dependency-resolution-v2) for the download/verification controls.
 
 ## Gateway Lifecycle
 
-On startup, the MCP first probes reachable local Gateway endpoints on the configured port and common Client Portal Gateway ports. If a healthy existing Gateway is found, the MCP attaches to it and does not start another bundled Gateway.
+On startup, the MCP first probes reachable local Gateway endpoints on the configured port and common Client Portal Gateway ports. If a healthy existing Gateway is found, the MCP attaches to it and does not start another managed Gateway.
 
-When no suitable existing Gateway is reachable, the MCP starts the bundled Java Gateway as a durable detached process. Runtime coordination files are stored under `ib-gateway/.runtime/`:
+When no suitable existing Gateway is reachable, the MCP [resolves the Gateway and Java runtime](#dependency-resolution-v2) and starts the Java Gateway as a durable detached process. Runtime coordination files are stored under the per-user cache run directory (`<cache>/run/`, where `<cache>` is `IB_CACHE_DIR` or the platform default):
 
 - `gateway-session.json` records the MCP-managed Gateway pid, port, version, and log paths.
 - `gateway-session.lock` prevents two MCP processes from starting duplicate managed Gateways at the same time.
@@ -211,7 +254,7 @@ When no suitable existing Gateway is reachable, the MCP starts the bundled Java 
 
 Normal MCP shutdown detaches from the Gateway and leaves it running so later MCP runs can reuse it. If `IB_FORCE_STANDALONE_GATEWAY=true` is set, the MCP skips unrelated external Gateway discovery, but it still reuses or coordinates through the durable MCP-managed session metadata and lock files.
 
-To reset the managed Gateway session, stop the Gateway process recorded in `ib-gateway/.runtime/gateway-session.json`, then remove `ib-gateway/.runtime/gateway-session.json` and any stale `ib-gateway/.runtime/gateway-session.lock`. The MCP automatically removes stale metadata when the recorded pid no longer exists.
+To reset the managed Gateway session, stop the Gateway process recorded in `<cache>/run/gateway-session.json`, then remove that file and any stale `<cache>/run/gateway-session.lock`. The MCP automatically removes stale metadata when the recorded pid no longer exists.
 
 ## Available MCP Tools
 
@@ -245,9 +288,10 @@ To reset the managed Gateway session, stop the Gateway process recorded in `ib-g
 **Gateway Discovery Problems:**
 
 - If another IB Gateway is already listening on a local port but should not be reused, set `IB_FORCE_STANDALONE_GATEWAY=true`
-- Existing gateways are only reused when the MCP process can reach them over HTTPS; otherwise the bundled standalone gateway is started on an available port
-- For MCP-managed Gateway startup issues, inspect `ib-gateway/.runtime/gateway.stdout.log`, `ib-gateway/.runtime/gateway.stderr.log`, and `ib-gateway/.runtime/gateway-session.json`
-- To clear a stale managed startup lock, confirm no MCP process is currently starting Gateway, then remove `ib-gateway/.runtime/gateway-session.lock`
+- Existing gateways are only reused when the MCP process can reach them over HTTPS; otherwise a managed standalone gateway is started on an available port
+- For MCP-managed Gateway startup issues, inspect `<cache>/run/gateway.stdout.log`, `<cache>/run/gateway.stderr.log`, and `<cache>/run/gateway-session.json` (where `<cache>` is `IB_CACHE_DIR` or the platform default cache directory)
+- To clear a stale managed startup lock, confirm no MCP process is currently starting Gateway, then remove `<cache>/run/gateway-session.lock`
+- If a download fails behind a restrictive network, either allow access to the BellSoft and Interactive Brokers download hosts, or pre-install the dependencies and set `IB_GATEWAY_DIR` / `IB_JAVA_HOME` with `IB_DOWNLOADS_DISABLED=true`
 
 ## Support
 

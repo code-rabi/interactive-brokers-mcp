@@ -1,2 +1,0 @@
-JAVA_VERSION="11.0.22"
-MODULES="java.base java.datatransfer java.xml java.prefs java.desktop java.logging java.management java.security.sasl java.naming java.net.http java.security.jgss java.transaction.xa java.sql jdk.crypto.ec jdk.crypto.cryptoki jdk.unsupported jdk.zipfs"

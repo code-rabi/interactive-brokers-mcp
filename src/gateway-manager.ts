@@ -1,22 +1,16 @@
 import { spawn, ChildProcess } from 'child_process';
-import { promises as fs, existsSync as fsExistsSync } from 'fs';
+import { promises as fs } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import { tmpdir } from 'os';
 import { Logger } from './logger.js';
 import { PortUtils } from './utils/port-utils.js';
 import { ConfigUtils } from './utils/config-utils.js';
+import { DependencyResolver, type ResolvedJava } from './dependency-resolver.js';
+import { isMuslLibc, resolveRuntimePlatform } from './utils/platform-utils.js';
 
 const require = createRequire(import.meta.url);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJson = require('../package.json') as { version: string };
-
-const MUSL_RUNTIME_DOWNLOADS: Record<string, string> = {
-  'linux-x64-musl': 'https://download.bell-sw.com/java/11.0.31+11/bellsoft-jre11.0.31+11-linux-x64-musl.tar.gz',
-  'linux-arm64-musl': 'https://download.bell-sw.com/java/11.0.31+11/bellsoft-jre11.0.31+11-linux-aarch64-musl.tar.gz',
-};
 
 type GatewaySessionMetadata = {
   managedBy: 'interactive-brokers-mcp';
@@ -31,8 +25,7 @@ type GatewaySessionMetadata = {
 
 export class IBGatewayManager {
   private gatewayProcess: ChildProcess | null = null;
-  private gatewayDir: string;
-  private jreDir: string;
+  private gatewayDir: string = '';
   private runtimeDir: string;
   private metadataPath: string;
   private lockPath: string;
@@ -54,11 +47,13 @@ export class IBGatewayManager {
     '/',
   ];
   private readonly forceStandaloneGateway: boolean;
+  private readonly resolver: DependencyResolver;
 
   constructor() {
-    this.gatewayDir = path.join(__dirname, '../ib-gateway');
-    this.jreDir = path.join(__dirname, '../runtime');
-    this.runtimeDir = path.join(this.gatewayDir, '.runtime');
+    this.resolver = new DependencyResolver((message) => this.log(message));
+    // Session metadata, locks and logs live in a stable per-user run directory, independent of
+    // the versioned cache directories that hold the downloaded gateway/runtime artifacts.
+    this.runtimeDir = DependencyResolver.runDir();
     this.metadataPath = path.join(this.runtimeDir, 'gateway-session.json');
     this.lockPath = path.join(this.runtimeDir, 'gateway-session.lock');
     this.stdoutLogPath = path.join(this.runtimeDir, 'gateway.stdout.log');
@@ -215,7 +210,9 @@ export class IBGatewayManager {
     try {
       // Only clean up temporary config files - don't kill gateway
       this.log('🧹 Cleaning up temporary files only...');
-      await ConfigUtils.cleanupTempConfigFiles(this.gatewayDir);
+      if (this.gatewayDir) {
+        await ConfigUtils.cleanupTempConfigFiles(this.gatewayDir);
+      }
       
       // Just clear references without killing the process
       this.gatewayProcess = null;
@@ -234,138 +231,29 @@ export class IBGatewayManager {
 
   // Removed forceKillGateway - we never kill gateway processes anymore
 
+  // Platform resolution helpers are shared with the dependency resolver; re-exposed as statics
+  // for backward compatibility and unit tests.
   private static resolveRuntimePlatform(
     platform: NodeJS.Platform = process.platform,
     arch: string = process.arch,
   ): string {
-    let runtimePlatform = `${platform}-${arch}`;
-    if (platform === 'linux' && IBGatewayManager.isMuslLibc(platform)) {
-      runtimePlatform = `${runtimePlatform}-musl`;
-    }
-    return runtimePlatform;
+    return resolveRuntimePlatform(platform, arch);
   }
 
-  private async getJavaPath(): Promise<string> {
-    const isWindows = process.platform === 'win32';
-    const javaExecutable = isWindows ? 'java.exe' : 'java';
-    const platform = IBGatewayManager.resolveRuntimePlatform();
-
-    const runtimePath = path.join(this.jreDir, platform, 'bin', javaExecutable);
-
-    if (!fsExistsSync(runtimePath)) {
-      await this.ensureRuntimeAvailable(platform, runtimePath);
-    }
-
-    if (!fsExistsSync(runtimePath)) {
-      throw new Error(`Custom runtime not found for platform: ${platform}. Expected at: ${runtimePath}`);
-    }
-
-    return runtimePath;
-  }
-
-  private async ensureRuntimeAvailable(platform: string, runtimePath: string): Promise<void> {
-    const runtimeUrl = MUSL_RUNTIME_DOWNLOADS[platform];
-    if (!runtimeUrl) {
-      throw new Error(`Custom runtime not found for platform: ${platform}. Expected at: ${runtimePath}`);
-    }
-
-    this.log(`⬇️ Bundled runtime missing for ${platform}; downloading a public musl JRE...`);
-    await this.downloadAndInstallRuntime(platform, runtimeUrl);
-  }
-
-  private async downloadAndInstallRuntime(platform: string, runtimeUrl: string): Promise<void> {
-    const response = await fetch(runtimeUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to download runtime for ${platform} from ${runtimeUrl}: HTTP ${response.status}`);
-    }
-
-    const tempRoot = await fs.mkdtemp(path.join(tmpdir(), `ib-mcp-runtime-${platform}-`));
-    const archivePath = path.join(tempRoot, 'runtime.tar.gz');
-    const extractDir = path.join(tempRoot, 'extract');
-    const installDir = path.join(this.jreDir, platform);
-    const stagingDir = path.join(this.jreDir, `${platform}.tmp-${process.pid}`);
-
-    try {
-      const archiveBuffer = Buffer.from(await response.arrayBuffer());
-      await fs.writeFile(archivePath, archiveBuffer);
-      await fs.mkdir(extractDir, { recursive: true });
-
-      await this.extractTarGz(archivePath, extractDir);
-
-      const extractedEntries = await fs.readdir(extractDir, { withFileTypes: true });
-      const extractedDir = extractedEntries.find((entry) => entry.isDirectory());
-      if (!extractedDir) {
-        throw new Error(`Downloaded runtime archive for ${platform} did not contain an extracted runtime directory`);
-      }
-
-      const extractedRuntimeDir = path.join(extractDir, extractedDir.name);
-      await fs.rm(stagingDir, { recursive: true, force: true });
-      await fs.rename(extractedRuntimeDir, stagingDir);
-      await fs.rm(installDir, { recursive: true, force: true });
-      await fs.rename(stagingDir, installDir);
-
-      this.log(`✅ Downloaded musl JRE for ${platform} (${packageJson.version})`);
-    } finally {
-      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
-      await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
-    }
-  }
-
-  private async extractTarGz(archivePath: string, destinationDir: string): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const tarProcess = spawn('tar', ['-xzf', archivePath, '-C', destinationDir], {
-        stdio: ['ignore', 'ignore', 'pipe'],
-      });
-
-      let stderr = '';
-      tarProcess.stderr?.on('data', (chunk) => {
-        stderr += chunk.toString();
-      });
-
-      tarProcess.on('error', reject);
-      tarProcess.on('exit', (code) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(new Error(`Failed to extract runtime archive with tar (exit ${code}): ${stderr.trim() || 'no stderr captured'}`));
-      });
-    });
-  }
-
-  // Detect whether the current Linux system uses musl libc (Alpine, etc.) rather than glibc.
-  // The bundled glibc JRE cannot exec on musl — its ELF interpreter /lib64/ld-linux-x86-64.so.2
-  // does not exist there, producing an opaque ENOENT at spawn time.
-  // The platform argument is injected so tests can exercise the matrix without mutating
-  // process.platform (which is non-configurable on some Node versions).
   static isMuslLibc(platform: NodeJS.Platform = process.platform): boolean {
-    if (platform !== 'linux') {
-      return false;
-    }
-    // process.report.getReport() exposes glibcVersionRuntime when glibc is present.
-    try {
-      const report = (process as { report?: { getReport: () => { header?: { glibcVersionRuntime?: string } } } }).report;
-      const glibcRuntime = report?.getReport?.().header?.glibcVersionRuntime;
-      if (typeof glibcRuntime === 'string' && glibcRuntime.length > 0) {
-        return false;
-      }
-    } catch {
-      // Fall through to filesystem check.
-    }
-    // Fallback: presence of the musl loader in its standard path.
-    return fsExistsSync('/lib/ld-musl-x86_64.so.1') || fsExistsSync('/lib/ld-musl-aarch64.so.1');
+    return isMuslLibc(platform);
   }
 
+  private async resolveJavaRuntime(): Promise<ResolvedJava> {
+    return this.resolver.resolveJava();
+  }
+
+  // Resolve the IB Gateway (user-managed via IB_GATEWAY_DIR, or downloaded + verified on demand)
+  // and record where its clientportal.gw directory lives for the rest of startup.
   async ensureGatewayExists(): Promise<void> {
-    const gatewayPath = path.join(this.gatewayDir, 'clientportal.gw');
-    const runScript = path.join(gatewayPath, 'bin/run.sh');
-    
-    try {
-      await fs.access(runScript);
-      this.log('✅ IB Gateway found at:' + gatewayPath);
-    } catch {
-      throw new Error(`IB Gateway not found at ${gatewayPath}. Please ensure the gateway files are properly installed.`);
-    }
+    const resolved = await this.resolver.resolveGateway();
+    this.gatewayDir = resolved.gatewayDir;
+    this.log('✅ IB Gateway available at: ' + path.join(this.gatewayDir, 'clientportal.gw'));
   }
 
   private async ensureRuntimeDir(): Promise<void> {
@@ -659,11 +547,12 @@ export class IBGatewayManager {
         }
       }
       
-      const bundledJavaPath = await this.getJavaPath();
-      const bundledJavaHome = path.dirname(path.dirname(bundledJavaPath));
-      const bundledJavaLibPath = path.join(bundledJavaHome, 'lib');
-      const bundledJavaServerLibPath = path.join(bundledJavaLibPath, 'server');
-      
+      const java = await this.resolveJavaRuntime();
+      const javaPath = java.javaPath;
+      const javaHome = java.javaHome;
+      const javaLibPath = javaHome ? path.join(javaHome, 'lib') : '';
+      const javaServerLibPath = javaLibPath ? path.join(javaLibPath, 'server') : '';
+
       const configFile = this.currentPort === defaultPort ? 'root/conf.yaml' : `root/conf-${this.currentPort}.yaml`;
       const jarPath = path.join(this.gatewayDir, 'clientportal.gw/dist/ibgroup.web.core.iblink.router.clientportal.gw.jar');
       const runtimePath = path.join(this.gatewayDir, 'clientportal.gw/build/lib/runtime/*');
@@ -671,10 +560,9 @@ export class IBGatewayManager {
       
       const classpath = [configDir, jarPath, runtimePath].join(path.delimiter);
 
-      this.log('🚀 Starting IB Gateway with bundled JRE...');
-      this.log('   Java: ' + bundledJavaPath);
-      this.log('   Java Home: ' + bundledJavaHome);
-      this.log(`   Lib Path: ${bundledJavaServerLibPath}:${bundledJavaLibPath}`);
+      this.log(`🚀 Starting IB Gateway with ${java.source} JRE...`);
+      this.log('   Java: ' + javaPath);
+      this.log('   Java Home: ' + (javaHome || '(system default)'));
       this.log('   Config: ' + configFile);
       this.log('   Port: ' + this.currentPort);
       
@@ -684,7 +572,7 @@ export class IBGatewayManager {
       await stdoutHandle.write(`\n[${new Date().toISOString()}] Starting IB Gateway on port ${this.currentPort}\n`);
       await stderrHandle.write(`\n[${new Date().toISOString()}] Starting IB Gateway on port ${this.currentPort}\n`);
 
-      const gatewayProcess = spawn(bundledJavaPath, [
+      const gatewayProcess = spawn(javaPath, [
         '-server',
         '-Djava.awt.headless=true',
         '-Xmx512m',
@@ -702,8 +590,14 @@ export class IBGatewayManager {
         detached: true,
         env: {
           ...process.env,
-          JAVA_HOME: bundledJavaHome,
-          LD_LIBRARY_PATH: `${bundledJavaServerLibPath}:${bundledJavaLibPath}:${process.env.LD_LIBRARY_PATH || ''}`
+          // Only override Java environment when we resolved a concrete JAVA_HOME (managed or
+          // env-provided runtime). For a system `java` on PATH we let it locate its own libs.
+          ...(javaHome
+            ? {
+                JAVA_HOME: javaHome,
+                LD_LIBRARY_PATH: `${javaServerLibPath}:${javaLibPath}:${process.env.LD_LIBRARY_PATH || ''}`,
+              }
+            : {}),
         },
         stdio: ['ignore', stdoutHandle.fd, stderrHandle.fd]
       });
@@ -716,7 +610,7 @@ export class IBGatewayManager {
       gatewayProcess.once('error', (error) => {
         Logger.error('❌ Gateway process error:', error.message);
         this.spawnFailure = {
-          reason: this.diagnoseSpawnError(error, bundledJavaPath),
+          reason: this.diagnoseSpawnError(error, javaPath),
           details: error.message,
         };
         this.isStarting = false;
@@ -787,14 +681,14 @@ export class IBGatewayManager {
 
   private diagnoseSpawnError(error: NodeJS.ErrnoException, javaPath: string): string {
     if (error.code === 'ENOENT' && process.platform === 'linux' && IBGatewayManager.isMuslLibc()) {
-      return `Failed to spawn bundled JRE at ${javaPath}: musl libc detected and the runtime is unavailable. ` +
-        `Ensure the host can download the public musl JRE fallback, or preinstall runtime/${IBGatewayManager.resolveRuntimePlatform()}.`;
+      return `Failed to spawn the Java runtime at ${javaPath}: musl libc detected and the runtime is incompatible. ` +
+        `Allow on-demand downloads (the managed runtime for ${IBGatewayManager.resolveRuntimePlatform()} is musl-aware), or set IB_JAVA_HOME to a musl-compatible Java 11+.`;
     }
     if (error.code === 'ENOENT') {
-      return `Failed to spawn bundled JRE at ${javaPath}: file not found or its dynamic loader is missing on this system.`;
+      return `Failed to spawn the Java runtime at ${javaPath}: file not found or its dynamic loader is missing on this system.`;
     }
     if (error.code === 'EACCES') {
-      return `Failed to spawn bundled JRE at ${javaPath}: permission denied (the file may not be executable).`;
+      return `Failed to spawn the Java runtime at ${javaPath}: permission denied (the file may not be executable).`;
     }
     return `Failed to spawn IB Gateway: ${error.message}`;
   }

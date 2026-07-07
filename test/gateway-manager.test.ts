@@ -86,22 +86,34 @@ describe('IBGatewayManager.isMuslLibc', () => {
 });
 
 describe('IBGatewayManager runtime platform resolution', () => {
+  const originalReport = (process as unknown as { report?: unknown }).report;
+
   afterEach(() => {
+    Object.defineProperty(process, 'report', { configurable: true, value: originalReport });
+    vi.mocked(fs.existsSync).mockReset();
+    vi.mocked(fs.existsSync).mockImplementation(() => false);
     vi.restoreAllMocks();
   });
 
+  const resolveRuntimePlatform = (IBGatewayManager as unknown as {
+    resolveRuntimePlatform: (platform?: NodeJS.Platform, arch?: string) => string;
+  }).resolveRuntimePlatform;
+
   it('uses the plain platform-arch key for glibc Linux', () => {
-    vi.spyOn(IBGatewayManager, 'isMuslLibc').mockReturnValue(false);
-    expect((IBGatewayManager as unknown as {
-      resolveRuntimePlatform: (platform?: NodeJS.Platform, arch?: string) => string;
-    }).resolveRuntimePlatform('linux', 'x64')).toBe('linux-x64');
+    Object.defineProperty(process, 'report', { configurable: true, value: {
+      getReport: () => ({ header: { glibcVersionRuntime: '2.36' } }),
+    } });
+    expect(resolveRuntimePlatform('linux', 'x64')).toBe('linux-x64');
   });
 
   it('routes Linux musl environments to the musl runtime key', () => {
-    vi.spyOn(IBGatewayManager, 'isMuslLibc').mockReturnValue(true);
-    expect((IBGatewayManager as unknown as {
-      resolveRuntimePlatform: (platform?: NodeJS.Platform, arch?: string) => string;
-    }).resolveRuntimePlatform('linux', 'arm64')).toBe('linux-arm64-musl');
+    Object.defineProperty(process, 'report', { configurable: true, value: {
+      getReport: () => ({ header: {} }),
+    } });
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p: fs.PathLike) => p === '/lib/ld-musl-aarch64.so.1',
+    );
+    expect(resolveRuntimePlatform('linux', 'arm64')).toBe('linux-arm64-musl');
   });
 });
 
@@ -246,7 +258,7 @@ describe('IBGatewayManager durable managed sessions', () => {
   function mockManagedStartup(manager: IBGatewayManager, pid = 4321) {
     const privateManager = manager as unknown as {
       ensureGatewayExists: () => Promise<void>;
-      getJavaPath: () => Promise<string>;
+      resolveJavaRuntime: () => Promise<{ javaPath: string; javaHome: string; source: string }>;
       checkGatewayHealth: (port?: number) => Promise<boolean>;
       acquireManagedGatewayLock: () => Promise<{ close: () => Promise<void> }>;
       releaseManagedGatewayLock: (handle: { close: () => Promise<void> } | null) => Promise<void>;
@@ -256,7 +268,11 @@ describe('IBGatewayManager durable managed sessions', () => {
     };
     const lockHandle = { close: vi.fn().mockResolvedValue(undefined) };
     vi.spyOn(privateManager, 'ensureGatewayExists').mockResolvedValue(undefined);
-    vi.spyOn(privateManager, 'getJavaPath').mockResolvedValue('/runtime/linux-x64/bin/java');
+    vi.spyOn(privateManager, 'resolveJavaRuntime').mockResolvedValue({
+      javaPath: '/runtime/linux-x64/bin/java',
+      javaHome: '/runtime/linux-x64',
+      source: 'download',
+    });
     vi.spyOn(privateManager, 'checkGatewayHealth').mockResolvedValue(true);
     vi.spyOn(privateManager, 'acquireManagedGatewayLock').mockResolvedValue(lockHandle);
     vi.spyOn(privateManager, 'releaseManagedGatewayLock').mockResolvedValue(undefined);
