@@ -106,6 +106,18 @@ describe('IBClient', () => {
       expect(result).toBe(false);
     });
 
+    it('should treat a competing session as unauthenticated', async () => {
+      // IBKR handed the brokerage session to another client. The gateway still reports it
+      // as established, but every request against it will fail.
+      mockFetch.mockResolvedValueOnce(
+        mockResponse({ authenticated: true, connected: true, established: true, competing: true })
+      );
+
+      const result = await client.checkAuthenticationStatus();
+
+      expect(result).toBe(false);
+    });
+
     it('should spawn the durable tickler with package-anchored paths and env cookies', () => {
       client.setSessionCookies([{ name: 'SBID', value: 'abc', domain: 'localhost' }]);
 

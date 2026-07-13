@@ -4,6 +4,7 @@ export interface AuthStatusResponse {
   authenticated?: boolean;
   connected?: boolean;
   established?: boolean;
+  competing?: boolean;
   MAC?: string;
   hardware_info?: string;
 }

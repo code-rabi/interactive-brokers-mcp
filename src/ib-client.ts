@@ -44,6 +44,8 @@ export class IBClient {
   private maxAuthAttempts = 3;
   private tickleInterval?: NodeJS.Timeout;
   private tickleIntervalMs = 30000;
+  private tickleFailures = 0;
+  private maxTickleFailures = 10;
   private sessionCookieHeader?: string;
   private runtimeDir = path.join(__dirname, "../ib-gateway/.runtime");
   private ticklerJsonPath = path.join(this.runtimeDir, "tickler-session.json");
@@ -135,6 +137,11 @@ export class IBClient {
   private isStatusAuthenticated(status: unknown): boolean {
     if (!status || typeof status !== "object") return false;
     const s = status as AuthStatusResponse;
+    // A competing session means IBKR has handed the brokerage session to another
+    // client (phone app, web portal, a second gateway). The gateway keeps reporting
+    // established/authenticated, but requests against it fail. Treat it as unhealthy
+    // so recovery escalates instead of us trusting a session we no longer hold.
+    if (s.competing === true) return false;
     if (s.established === true) return true;
     return s.authenticated === true && s.connected !== false;
   }
@@ -188,20 +195,46 @@ export class IBClient {
 
       const authStatus = response.data?.iserver?.authStatus;
       if (authStatus && !this.isStatusAuthenticated(authStatus)) {
-        this.isAuthenticated = false;
-        this.stopTickle();
         Logger.warn("[TICKLE] Tickle returned unauthenticated status:", authStatus);
+        await this.recoverBrokerageSession();
         return;
       }
+      this.tickleFailures = 0;
       Logger.log("[TICKLE] Session maintenance ping sent successfully");
     } catch (error) {
-      Logger.warn("[TICKLE] Failed to send session maintenance ping:", error);
-      const isAuth = await this.checkAuthenticationStatus();
-      if (!isAuth) {
-        Logger.warn("[TICKLE] Session expired, stopping tickle interval");
+      // Connection refused, socket hang-up, gateway restarting, machine asleep: none
+      // of these mean the session is gone. Tolerate a run of them rather than tearing
+      // the loop down on the first blip and letting the session decay silently.
+      this.tickleFailures++;
+      Logger.warn(`[TICKLE] Session maintenance ping failed (${this.tickleFailures}/${this.maxTickleFailures}):`, error);
+      if (this.tickleFailures >= this.maxTickleFailures) {
+        Logger.warn("[TICKLE] Gateway unreachable for too long, stopping tickle interval");
+        this.isAuthenticated = false;
         this.stopTickle();
       }
     }
+  }
+
+  /**
+   * The brokerage session expires well before the SSO session does, so a plain
+   * reauthenticate is normally enough to bring it back - no browser, no 2FA, and no
+   * exposure to IBKR's login rate limits. Only give up once that fails, at which
+   * point the next tool call drives a full login.
+   */
+  private async recoverBrokerageSession(): Promise<void> {
+    try {
+      if (await this.initializeBrokerageSession()) {
+        this.tickleFailures = 0;
+        Logger.log("[TICKLE] Brokerage session recovered without a full login");
+        return;
+      }
+    } catch (error) {
+      Logger.warn("[TICKLE] Brokerage session recovery threw:", error);
+    }
+
+    Logger.warn("[TICKLE] Could not recover the brokerage session; a full login is required");
+    this.isAuthenticated = false;
+    this.stopTickle();
   }
 
   private startTickle(): void {

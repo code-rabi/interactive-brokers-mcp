@@ -365,6 +365,44 @@ describe('ToolHandlers', () => {
       expect(HeadlessAuthenticator).not.toHaveBeenCalled();
     });
 
+    it('should recover an expired session via reauthenticate without a browser or 2FA', async () => {
+      const mockAccounts = [{ id: 'U12345' }];
+      mockIBClient.getAccountInfo = vi.fn().mockResolvedValue({ accounts: mockAccounts });
+      mockIBClient.reauthenticate = vi.fn();
+
+      // The brokerage session is dead but SSO is still valid, so reauthenticate revives it.
+      vi.mocked(mockIBClient.checkAuthenticationStatus)
+        .mockResolvedValueOnce(false) // ensureAuth's initial check
+        .mockResolvedValueOnce(true);  // after reauthenticate
+
+      const result = await handlers.getAccountInfo({ confirm: true });
+
+      const payload = JSON.parse(result.content[0].text);
+      expect(payload.accounts).toEqual(mockAccounts);
+      expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
+      // The whole point: no headless login, so no TOTP and no IBKR login rate limit.
+      expect(HeadlessAuthenticator).not.toHaveBeenCalled();
+    });
+
+    it('should open the circuit breaker after repeated login failures', async () => {
+      vi.useFakeTimers();
+      vi.mocked(mockIBClient.checkAuthenticationStatus).mockResolvedValue(false);
+      mockIBClient.reauthenticate = vi.fn();
+
+      for (let i = 0; i < 5; i++) {
+        const attempt = (handlers as any).ensureAuth();
+        attempt.catch(() => {}); // avoid an unhandled rejection while we advance timers
+        await vi.advanceTimersByTimeAsync(11 * 1000);
+        await expect(attempt).rejects.toThrow(/Authentication timed out/);
+      }
+
+      // The sixth attempt must refuse to touch IBKR again rather than risk a lockout.
+      const guarded = await (handlers as any).ensureAuth();
+      expect(guarded.ok).toBe(false);
+      expect(JSON.parse(guarded.result.content[0].text).status).toBe('AUTHENTICATION_CIRCUIT_OPEN');
+      expect(HeadlessAuthenticator).toHaveBeenCalledTimes(5);
+    });
+
     it('should block, authenticate, and then return account info', async () => {
       vi.useFakeTimers();
       const mockAccounts = [{ id: 'U12345' }];
@@ -435,7 +473,7 @@ describe('ToolHandlers', () => {
       expect(mockIBClient.reauthenticate).not.toHaveBeenCalled();
     });
 
-    it('should throw when not authenticated on both checks', async () => {
+    it('should attempt reauthenticate before giving up, and throw when it does not help', async () => {
       mockIBClient.checkAuthenticationStatus = vi.fn()
         .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(false);
@@ -443,7 +481,17 @@ describe('ToolHandlers', () => {
 
       await expect((handlers as any).ensureAuth())
         .rejects.toThrow('Authentication required');
-      expect(mockIBClient.reauthenticate).not.toHaveBeenCalled();
+      expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
+    });
+
+    it('should recover via reauthenticate without forcing a manual browser login', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      mockIBClient.reauthenticate = vi.fn();
+
+      await expect((handlers as any).ensureAuth()).resolves.toEqual({ ok: true });
+      expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
     });
   });
 
