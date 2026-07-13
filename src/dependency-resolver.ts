@@ -35,7 +35,7 @@ export type ResolvedJava = {
   source: 'IB_JAVA_HOME' | 'JAVA_HOME' | 'system' | 'download';
 };
 
-export type ResolvedGateway = {
+type ResolvedGateway = {
   // Directory that contains the `clientportal.gw` subdirectory.
   gatewayDir: string;
   source: 'IB_GATEWAY_DIR' | 'download';
