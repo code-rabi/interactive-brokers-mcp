@@ -354,13 +354,22 @@ export class DependencyResolver {
       const detail =
         `Pinned sha256 mismatch for ${url}.\n  expected ${verify.sha256}\n  actual   ${sha256}` +
         (verify.md5 ? `\n  (expected md5 ${verify.md5}, actual md5 ${md5})` : '');
-      if (verify.allowSha256Mismatch) {
+      // The escape hatch only waives the *pinned* anchor, never all verification: it requires the
+      // live CDN ETag check above to have actually run. Without it these bytes are unverified.
+      if (verify.allowSha256Mismatch && verify.liveMd5) {
         this.log(`⚠️ ${detail}`);
-        this.log('⚠️ Proceeding because IB_GATEWAY_ALLOW_UNVERIFIED=true. The vendor likely rotated the artifact; consider updating dependencies.manifest.json.');
+        this.log('⚠️ Proceeding because IB_GATEWAY_ALLOW_UNVERIFIED=true and the bytes still match the live CDN ETag. The vendor likely rotated the artifact; consider updating dependencies.manifest.json.');
+      } else if (verify.allowSha256Mismatch) {
+        throw new Error(
+          `${detail}\nIB_GATEWAY_ALLOW_UNVERIFIED=true, but the live CDN ETag could not be read, so these bytes ` +
+          `cannot be verified against anything. Refusing to install an unverified artifact. ` +
+          `Retry when the vendor host is reachable, or update dependencies.manifest.json with a reviewed checksum.`,
+        );
       } else {
         throw new Error(
           `${detail}\nThe vendor may have rotated this artifact. ` +
-          `Update dependencies.manifest.json with the new checksum, or set IB_GATEWAY_ALLOW_UNVERIFIED=true to proceed (the live CDN ETag is still checked).`,
+          `Update dependencies.manifest.json with the new checksum, or set IB_GATEWAY_ALLOW_UNVERIFIED=true to proceed ` +
+          `(this only waives the pinned checksum; the live CDN ETag must still verify the bytes).`,
         );
       }
     } else {

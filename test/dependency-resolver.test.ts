@@ -172,14 +172,26 @@ describe('DependencyResolver download verification', () => {
     ).rejects.toThrow(/sha256 mismatch/i);
   });
 
-  it('proceeds past a sha256 mismatch when IB_GATEWAY_ALLOW_UNVERIFIED is allowed', async () => {
+  it('proceeds past a sha256 mismatch when IB_GATEWAY_ALLOW_UNVERIFIED is allowed and the live ETag still matches', async () => {
     const resolver = new DependencyResolver() as unknown as PrivateResolver;
     const result = await resolver.downloadAndVerify('https://x/y', {
       sha256: '0'.repeat(64),
+      liveMd5: md5,
       allowSha256Mismatch: true,
     });
     expect(typeof result.path).toBe('string');
     await result.cleanup();
+  });
+
+  it('still refuses a sha256 mismatch under IB_GATEWAY_ALLOW_UNVERIFIED when no live ETag is available', async () => {
+    const resolver = new DependencyResolver() as unknown as PrivateResolver;
+    await expect(
+      resolver.downloadAndVerify('https://x/y', {
+        sha256: '0'.repeat(64),
+        liveMd5: null,
+        allowSha256Mismatch: true,
+      }),
+    ).rejects.toThrow(/cannot be verified against anything/i);
   });
 
   it('refuses gateway downloads from a non-official host or non-HTTPS URL', () => {

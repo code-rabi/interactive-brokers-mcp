@@ -1,6 +1,7 @@
 // test/ib-client.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { IBClient, SymbolNotFoundError } from '../src/ib-client.js';
+import { DependencyResolver } from '../src/dependency-resolver.js';
 
 const { mockSpawn, mockFs } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
@@ -118,13 +119,14 @@ describe('IBClient', () => {
       expect(result).toBe(false);
     });
 
-    it('should spawn the durable tickler with package-anchored paths and env cookies', () => {
+    it('should spawn the durable tickler with cache-anchored paths and env cookies', () => {
       client.setSessionCookies([{ name: 'SBID', value: 'abc', domain: 'localhost' }]);
 
       (client as any).spawnDurableTickler();
 
+      // Tickler session state lives in the per-user run dir, not inside the installed package.
       expect(mockFs.mkdirSync).toHaveBeenCalledWith(
-        expect.stringContaining('ib-gateway/.runtime'),
+        DependencyResolver.runDir(),
         { recursive: true }
       );
       expect(mockSpawn).toHaveBeenCalledWith(

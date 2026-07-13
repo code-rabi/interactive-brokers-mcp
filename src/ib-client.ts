@@ -4,6 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { Agent } from "undici";
 import { Logger } from "./logger.js";
+import { DependencyResolver } from "./dependency-resolver.js";
 import {
   HttpClient,
   HttpError,
@@ -47,7 +48,7 @@ export class IBClient {
   private tickleFailures = 0;
   private maxTickleFailures = 10;
   private sessionCookieHeader?: string;
-  private runtimeDir = path.join(__dirname, "../ib-gateway/.runtime");
+  private runtimeDir = DependencyResolver.runDir();
   private ticklerJsonPath = path.join(this.runtimeDir, "tickler-session.json");
   private ticklerScriptPath = path.join(__dirname, "scripts/tickler.js");
 
