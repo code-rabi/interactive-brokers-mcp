@@ -55,8 +55,15 @@ type HeadlessAuthOutcome = {
 const DEFAULT_AUTH_WAIT_SECONDS = 60;
 const DEFAULT_AUTH_POLL_SECONDS = 5;
 
+/**
+ * IBKR rate-limits rapid logins and will lock an account that keeps retrying. Without
+ * this ceiling a broken login drives a fresh browser session on every tool call.
+ */
+const MAX_FAILED_LOGINS = 5;
+
 export class ToolHandlers {
   private context: ToolHandlerContext;
+  private failedLogins = 0;
 
   constructor(context: ToolHandlerContext) {
     this.context = context;
@@ -160,6 +167,15 @@ export class ToolHandlers {
       return { ok: true };
     }
 
+    // The brokerage session expires long before the SSO session does, so a plain
+    // reauthenticate normally revives it - no browser, no 2FA, and no exposure to
+    // IBKR's login rate limits. Try that before paying for a full login. This is the
+    // cheap rung of the ladder and it works in browser mode too, where the only other
+    // option is to make the user go and click through a login page.
+    if (await this.tryReauthenticate()) {
+      return { ok: true };
+    }
+
     // If not authenticated, and not in headless mode, throw an error immediately.
     if (!this.context.config.IB_HEADLESS_MODE) {
       const authUrl = this.buildAuthUrl();
@@ -180,6 +196,21 @@ export class ToolHandlers {
       };
     }
     
+    // Stop hammering IBKR once a login is clearly not going to succeed: retrying on
+    // every tool call is how an account ends up rate-limited or locked out.
+    if (this.failedLogins >= MAX_FAILED_LOGINS) {
+      return {
+        ok: false,
+        result: this.jsonResult({
+          success: false,
+          status: "AUTHENTICATION_CIRCUIT_OPEN",
+          message: `Headless authentication failed ${this.failedLogins} times in a row. Refusing to retry automatically to avoid IBKR rate-limiting or an account lockout.`,
+          nextInstruction:
+            "Check IB_USERNAME, IB_PASSWORD_AUTH and IB_TOTP_SECRET, then call the 'authenticate' tool to reset the circuit and retry.",
+        }),
+      };
+    }
+
     // Configuration for the polling loop
     const timeoutSeconds = this.context.config.IB_AUTH_TIMEOUT || 300; // 5 minutes default
     const pollIntervalSeconds = 5;
@@ -212,28 +243,83 @@ export class ToolHandlers {
       isAuthenticated = await this.context.ibClient.checkAuthenticationStatus();
       if (isAuthenticated) {
         Logger.info("✅ Authentication successful.");
+        this.failedLogins = 0;
         return { ok: true };
       }
       await this.sleep(pollIntervalSeconds * 1000);
     }
 
     // If the loop completes without success, we've timed out
-    Logger.error(`❌ Authentication timed out after ${timeoutSeconds} seconds.`);
+    this.failedLogins++;
+    Logger.error(`❌ Authentication timed out after ${timeoutSeconds} seconds (failure ${this.failedLogins}/${MAX_FAILED_LOGINS}).`);
     throw new Error(`Authentication timed out after ${timeoutSeconds} seconds. Please check for a 2FA notification on your device.`);
+  }
+
+  /**
+   * Cheapest rung of the recovery ladder: a plain reauthenticate against the gateway,
+   * reusing the SSO session we still hold. Costs one HTTP round trip and, unlike a full
+   * login, involves no browser, no 2FA and no login rate limit.
+   */
+  private async tryReauthenticate(): Promise<boolean> {
+    try {
+      Logger.info("Brokerage session is not authenticated; attempting reauthenticate before a full login.");
+      await this.context.ibClient.reauthenticate();
+      const recovered = await this.context.ibClient.checkAuthenticationStatus();
+      if (recovered) {
+        Logger.info("✅ Reauthenticate restored the brokerage session; skipping full login.");
+        this.failedLogins = 0;
+      } else {
+        Logger.info("Reauthenticate did not restore the session; a full login is required.");
+      }
+      return recovered;
+    } catch (error) {
+      Logger.warn("Reauthenticate failed; falling back to a full login:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Transport failures that mean "the connection died", not "the request was rejected".
+   * A dropped socket to the gateway is recoverable by re-establishing the session, so it
+   * has to be classified as an auth error - otherwise it surfaces raw to the caller and
+   * the recovery path in ensureAuth never runs.
+   */
+  private isTransportError(error: any): boolean {
+    const code = error?.code || error?.cause?.code;
+    if (
+      code === "ECONNRESET" ||
+      code === "EPIPE" ||
+      code === "ECONNREFUSED" ||
+      code === "ETIMEDOUT" ||
+      code === "ENOTFOUND" ||
+      code === "UND_ERR_SOCKET" ||
+      code === "UND_ERR_CONNECT_TIMEOUT"
+    ) {
+      return true;
+    }
+
+    const message = String(error?.message || "");
+    return (
+      message.includes("stream was destroyed") ||
+      message.includes("socket hang up") ||
+      message.includes("other side closed") ||
+      message.includes("fetch failed")
+    );
   }
 
   // Helper function to check for authentication errors
   private isAuthenticationError(error: any): boolean {
     if (!error) return false;
-    
+
     const errorMessage = error.message || error.toString();
     const errorStatus = error.response?.status;
     const responseData = error.response?.data;
-    
+
     return (
       errorStatus === 401 ||
       errorStatus === 403 ||
       errorStatus === 500 ||
+      this.isTransportError(error) ||
       errorMessage.includes("authentication") ||
       errorMessage.includes("unauthorized") ||
       errorMessage.includes("not authenticated") ||
@@ -310,9 +396,13 @@ export class ToolHandlers {
 
   async authenticate(input: AuthenticateInput): Promise<ToolHandlerResult> {
     try {
+      // An explicit authenticate call is the caller asserting they have fixed whatever
+      // was broken, so it resets the circuit breaker that ensureAuth may have opened.
+      this.failedLogins = 0;
+
       // Ensure Gateway is ready
       await this.ensureGatewayReady();
-      
+
       const port = this.context.gatewayManager 
         ? this.context.gatewayManager.getCurrentPort() 
         : this.context.config.IB_GATEWAY_PORT;
