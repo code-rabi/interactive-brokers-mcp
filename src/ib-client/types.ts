@@ -24,6 +24,7 @@ export interface ContractSearch {
   symbol: string;
   description?: string;
   companyHeader?: string;
+  restricted?: string | boolean;
   sections?: ContractSection[];
 }
 
@@ -59,7 +60,7 @@ export interface OrderPayload {
   quantity: number;
   tif: string;
   secType?: string;
-  exchange?: string;
+  listingExchange?: string;
   price?: number;
   auxPrice?: number;
 }
@@ -77,7 +78,7 @@ export interface IBClientConfig {
 export interface ContractLookupRequest {
   symbol?: string;
   conid?: number;
-  secType?: "STK" | "OPT";
+  secType?: "STK" | "OPT" | "FUND";
   expiry?: string;
   strike?: number;
   right?: "C" | "P";
@@ -85,10 +86,12 @@ export interface ContractLookupRequest {
 }
 
 export interface OrderRequest extends ContractLookupRequest {
+  mode: "PREVIEW" | "SUBMIT";
   accountId: string;
   action: "BUY" | "SELL";
   orderType: "MKT" | "LMT" | "STP";
-  quantity: number;
+  quantity?: number;
+  fullPosition?: boolean;
   price?: number;
   stopPrice?: number;
   suppressConfirmations?: boolean;
@@ -98,7 +101,7 @@ export interface OrderRequest extends ContractLookupRequest {
 export interface ResolvedContract {
   conid: number;
   symbol: string;
-  secType: "STK" | "OPT";
+  secType: "STK" | "OPT" | "FUND";
   contract: ContractSearch | OptionContractInfo;
   underlyingConid?: number;
 }

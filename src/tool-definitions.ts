@@ -5,7 +5,7 @@ const IntegerOrStringIntegerZod = z.union([
   z.string().regex(/^[0-9]+(\.[0-9]+)?$/).transform((val) => parseFloat(val))
 ]);
 
-const SecurityTypeZod = z.enum(["STK", "OPT"]);
+const SecurityTypeZod = z.enum(["STK", "OPT", "FUND"]);
 const OptionRightZod = z.enum(["C", "P"]);
 
 export const AuthenticateZodShape = {
@@ -39,6 +39,7 @@ export const GetMarketDataZodShape = {
 };
 
 export const PlaceOrderZodShape = {
+  mode: z.enum(["PREVIEW", "SUBMIT"]),
   accountId: z.string(),
   symbol: z.string().optional(),
   conid: IntegerOrStringIntegerZod.optional(),
@@ -48,7 +49,8 @@ export const PlaceOrderZodShape = {
   right: OptionRightZod.optional(),
   action: z.enum(["BUY", "SELL"]),
   orderType: z.enum(["MKT", "LMT", "STP"]),
-  quantity: IntegerOrStringIntegerZod,
+  quantity: IntegerOrStringIntegerZod.optional(),
+  fullPosition: z.boolean().optional(),
   price: z.number().optional(),
   stopPrice: z.number().optional(),
   suppressConfirmations: z.boolean().optional(),
@@ -159,6 +161,22 @@ export const PlaceOrderZodSchema = z
         code: z.ZodIssueCode.custom,
         message: "Either symbol or conid is required",
         path: ["symbol"]
+      });
+    }
+
+    if (data.quantity === undefined && data.fullPosition !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Either quantity or fullPosition: true is required",
+        path: ["quantity"]
+      });
+    }
+
+    if (data.quantity !== undefined && data.fullPosition === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "quantity and fullPosition cannot be used together",
+        path: ["fullPosition"]
       });
     }
 

@@ -34,6 +34,7 @@ describe('ToolHandlers', () => {
       getAccountInfo: vi.fn().mockResolvedValue({ accounts: [] }),
       getPositions: vi.fn().mockResolvedValue([]),
       getMarketData: vi.fn().mockResolvedValue({ price: 150 }),
+      order: vi.fn().mockResolvedValue({ orderId: '123' }),
       placeOrder: vi.fn().mockResolvedValue({ orderId: '123' }),
       getOrderStatus: vi.fn().mockResolvedValue({ status: 'Filled' }),
       getOrders: vi.fn().mockResolvedValue([]),
@@ -140,9 +141,10 @@ describe('ToolHandlers', () => {
   describe('placeOrder', () => {
     it('should place market order', async () => {
       const mockResponse = { orderId: '123', status: 'Submitted' };
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
+      mockIBClient.order = vi.fn().mockResolvedValue(mockResponse);
 
       const orderInput = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -153,7 +155,7 @@ describe('ToolHandlers', () => {
       const result = await handlers.placeOrder(orderInput);
 
       expect(result.content).toBeDefined();
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
+      expect(mockIBClient.order).toHaveBeenCalledWith(
         expect.objectContaining({
           accountId: 'U12345',
           symbol: 'AAPL',
@@ -166,9 +168,10 @@ describe('ToolHandlers', () => {
 
     it('should place limit order with price', async () => {
       const mockResponse = { orderId: '123', status: 'Submitted' };
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
+      mockIBClient.order = vi.fn().mockResolvedValue(mockResponse);
 
       const orderInput = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -179,18 +182,19 @@ describe('ToolHandlers', () => {
 
       await handlers.placeOrder(orderInput);
 
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
+      expect(mockIBClient.order).toHaveBeenCalledWith(
         expect.objectContaining({
           price: 150.50,
         })
       );
     });
 
-    it('should forward exchange and tif to ibClient.placeOrder when provided', async () => {
+    it('should forward exchange and tif to ibClient.order when provided', async () => {
       const mockResponse = { orderId: '123', status: 'Submitted' };
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
+      mockIBClient.order = vi.fn().mockResolvedValue(mockResponse);
 
       const orderInput = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -202,7 +206,7 @@ describe('ToolHandlers', () => {
 
       await handlers.placeOrder(orderInput);
 
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
+      expect(mockIBClient.order).toHaveBeenCalledWith(
         expect.objectContaining({
           exchange: 'NASDAQ',
           tif: 'GTC',
@@ -211,9 +215,10 @@ describe('ToolHandlers', () => {
     });
 
     it('should handle order placement errors', async () => {
-      mockIBClient.placeOrder = vi.fn().mockRejectedValue(new Error('Order failed'));
+      mockIBClient.order = vi.fn().mockRejectedValue(new Error('Order failed'));
 
       const orderInput = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -638,9 +643,10 @@ describe('ToolHandlers', () => {
     });
 
     it('should pass option order fields through to the IB client', async () => {
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue({ orderId: '123', status: 'Submitted' });
+      mockIBClient.order = vi.fn().mockResolvedValue({ orderId: '123', status: 'Submitted' });
 
       await handlers.placeOrder({
+        mode: 'SUBMIT',
         accountId: 'U12345',
         symbol: 'AAPL',
         secType: 'OPT',
@@ -653,7 +659,7 @@ describe('ToolHandlers', () => {
         price: 4.5,
       });
 
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
+      expect(mockIBClient.order).toHaveBeenCalledWith(
         expect.objectContaining({
           symbol: 'AAPL',
           secType: 'OPT',

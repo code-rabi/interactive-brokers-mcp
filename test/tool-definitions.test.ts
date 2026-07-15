@@ -16,6 +16,7 @@ describe('Tool Definitions - Zod Schemas', () => {
   describe('PlaceOrderZodSchema', () => {
     it('should accept valid market order', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -29,6 +30,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept fractional quantities as numbers', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -45,6 +47,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept fractional quantities as strings', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -61,6 +64,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept integer quantities as strings', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -77,6 +81,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject negative quantities', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -90,6 +95,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject zero quantity', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -103,6 +109,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should require price for LMT orders', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -116,6 +123,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept valid LMT order with price', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -130,6 +138,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should require stopPrice for STP orders', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'SELL' as const,
@@ -143,6 +152,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept valid STP order with stopPrice', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'SELL' as const,
@@ -157,6 +167,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept suppressConfirmations flag', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -173,6 +184,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       'should accept tif value %s',
       (tif) => {
         const validOrder = {
+          mode: 'SUBMIT' as const,
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY' as const,
@@ -188,6 +200,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject an invalid tif value', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -202,6 +215,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept exchange when provided alongside required fields', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -212,6 +226,48 @@ describe('Tool Definitions - Zod Schemas', () => {
 
       const result = PlaceOrderZodSchema.safeParse(validOrder);
       expect(result.success).toBe(true);
+    });
+
+    it.each(['PREVIEW', 'SUBMIT'] as const)('should accept mode %s', (mode) => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode,
+        accountId: 'U12345',
+        conid: 123456,
+        secType: 'FUND',
+        action: 'SELL',
+        orderType: 'MKT',
+        fullPosition: true,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject unsupported modes', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'DRY_RUN',
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject quantity together with fullPosition', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'PREVIEW',
+        accountId: 'U12345',
+        conid: 123456,
+        secType: 'FUND',
+        action: 'SELL',
+        orderType: 'MKT',
+        quantity: 1,
+        fullPosition: true,
+      });
+
+      expect(result.success).toBe(false);
     });
   });
 
@@ -427,6 +483,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept option orders with contract details', () => {
       const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
         accountId: 'U12345',
         symbol: 'AAPL',
         secType: 'OPT',
@@ -444,6 +501,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject option orders missing expiry when conid is not provided', () => {
       const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
         accountId: 'U12345',
         symbol: 'AAPL',
         secType: 'OPT',
