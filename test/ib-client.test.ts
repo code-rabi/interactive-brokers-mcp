@@ -228,6 +228,10 @@ describe('IBClient', () => {
 
         mockFetch
           .mockResolvedValueOnce(mockResponse(mockAccounts))
+          .mockResolvedValueOnce(mockResponse({
+            metadata: { total: 0, pageSize: 20, pageNum: 0 },
+            subaccounts: [],
+          }))
           .mockResolvedValueOnce(mockResponse(mockSummary));
 
         const result = await client.getAccountInfo();
@@ -238,6 +242,81 @@ describe('IBClient', () => {
         );
         expect(result.accounts).toEqual(mockAccounts);
         expect(result.summaries).toHaveLength(1);
+      });
+
+      it('should fetch and merge every page of accounts in a tiered advisor structure', async () => {
+        const masterAccount = { id: 'F12345', accountId: 'F12345', businessType: 'FA' };
+        const firstClient = { id: 'U12345', accountId: 'U12345', businessType: 'FA_CLIENT' };
+        const secondClient = { id: 'U67890', accountId: 'U67890', businessType: 'FA_CLIENT' };
+
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([masterAccount]))
+          .mockResolvedValueOnce(mockResponse({
+            metadata: { total: 3, pageSize: 2, pageNum: 0 },
+            subaccounts: [masterAccount, firstClient],
+          }))
+          .mockResolvedValueOnce(mockResponse({
+            metadata: { total: 3, pageSize: 2, pageNum: 1 },
+            subaccounts: [secondClient],
+          }))
+          .mockResolvedValueOnce(mockResponse({ netliquidation: { amount: 30 } }))
+          .mockResolvedValueOnce(mockResponse({ netliquidation: { amount: 10 } }))
+          .mockResolvedValueOnce(mockResponse({ netliquidation: { amount: 20 } }));
+
+        const result = await client.getAccountInfo();
+
+        expect(mockFetch).toHaveBeenNthCalledWith(
+          2,
+          expect.stringContaining('/portfolio/subaccounts2?page=0'),
+          expect.objectContaining({ method: 'GET' }),
+        );
+        expect(mockFetch).toHaveBeenNthCalledWith(
+          3,
+          expect.stringContaining('/portfolio/subaccounts2?page=1'),
+          expect.objectContaining({ method: 'GET' }),
+        );
+        expect(result.accounts).toEqual([masterAccount, firstClient, secondClient]);
+        expect(result.summaries.map((entry) => entry.accountId)).toEqual([
+          'F12345',
+          'U12345',
+          'U67890',
+        ]);
+      });
+
+      it('should tolerate an empty or malformed subaccounts response', async () => {
+        const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
+
+        mockFetch
+          .mockResolvedValueOnce(mockResponse(mockAccounts))
+          .mockResolvedValueOnce(mockResponse({ unexpected: 'response' }))
+          .mockResolvedValueOnce(mockResponse({ totalCashValue: 10000 }));
+
+        const result = await client.getAccountInfo();
+
+        expect(result.accounts).toEqual(mockAccounts);
+        expect(result.summaries).toHaveLength(1);
+      });
+
+      it('should fall back to accounts collected so far when the subaccounts endpoint fails', async () => {
+        const mockAccounts = [{ id: 'U12345', accountId: 'U12345' }];
+
+        mockFetch
+          .mockResolvedValueOnce(mockResponse(mockAccounts))
+          .mockResolvedValueOnce(mockResponse({ error: 'temporary failure' }, 500))
+          .mockResolvedValueOnce(mockResponse({ totalCashValue: 10000 }));
+
+        const result = await client.getAccountInfo();
+
+        expect(result.accounts).toEqual(mockAccounts);
+        expect(result.summaries).toHaveLength(1);
+      });
+
+      it('should not hide authentication failures from the subaccounts endpoint', async () => {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ id: 'U12345' }]))
+          .mockResolvedValueOnce(mockResponse({ error: 'not authenticated' }, 401));
+
+        await expect(client.getAccountInfo()).rejects.toThrow('Authentication required');
       });
     });
 

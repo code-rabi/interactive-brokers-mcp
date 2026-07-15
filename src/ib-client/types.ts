@@ -66,6 +66,7 @@ export interface OrderPayload {
 
 export interface AccountEntry {
   id?: string;
+  accountId?: string;
 }
 
 export interface IBClientConfig {
