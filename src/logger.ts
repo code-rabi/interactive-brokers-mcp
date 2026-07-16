@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync } from 'fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -12,13 +12,19 @@ export class Logger {
                                        process.argv.includes('--log-console');
 
   private static ensureLogDir() {
-    if (Logger.enableLogging && !existsSync(Logger.logDir)) {
+    if (!Logger.enableLogging) return;
+    if (!existsSync(Logger.logDir)) {
       try {
-        mkdirSync(Logger.logDir, { recursive: true });
+        mkdirSync(Logger.logDir, { recursive: true, mode: 0o700 });
       } catch (error) {
         // If we can't create log dir, disable logging
         Logger.enableLogging = false;
       }
+    }
+    try {
+      chmodSync(Logger.logDir, 0o700);
+    } catch {
+      Logger.enableLogging = false;
     }
   }
 
@@ -32,7 +38,8 @@ export class Logger {
         Logger.serializeArgument(arg)
       ).join(' ') : '';
       const logLine = `${timestamp} [${level}] ${message}${argsStr}\n`;
-      appendFileSync(Logger.logFile, logLine, 'utf8');
+      appendFileSync(Logger.logFile, logLine, { encoding: 'utf8', mode: 0o600 });
+      chmodSync(Logger.logFile, 0o600);
     } catch (error) {
       // Silently fail to avoid recursive logging issues
     }

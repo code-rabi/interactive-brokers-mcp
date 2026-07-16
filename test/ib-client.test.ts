@@ -654,6 +654,54 @@ describe('IBClient', () => {
           submissionUncertain: false,
         });
       });
+
+      it.each([502, 503, 504])('should treat HTTP %s gateway responses as submission uncertain', async (status) => {
+        const gatewayBody = { error: 'Order rejected', errorCode: 201, proxy: 'upstream' };
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({
+            conid: 265598,
+            symbol: 'AAPL',
+            secType: 'STK',
+            currency: 'USD',
+          }))
+          .mockResolvedValueOnce(mockResponse(gatewayBody, status));
+
+        const error = await client.placeOrder({
+          clientOrderId: `codex-gateway-${status}`,
+          accountId: 'U12345',
+          conid: 265598,
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        }).catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(OrderSubmissionError);
+        expect(error).toMatchObject({ status, ibkrBody: gatewayBody, submissionUncertain: true });
+      });
+
+      it('should treat a malformed 4xx response as submission uncertain', async () => {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({
+            conid: 265598,
+            symbol: 'AAPL',
+            secType: 'STK',
+            currency: 'USD',
+          }))
+          .mockResolvedValueOnce(mockResponse('<html>proxy error</html>', 400));
+
+        const error = await client.placeOrder({
+          clientOrderId: 'codex-malformed-400',
+          accountId: 'U12345',
+          conid: 265598,
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        }).catch((caught) => caught);
+
+        expect(error).toMatchObject({ status: 400, submissionUncertain: true });
+      });
     });
 
     describe('getOrders', () => {

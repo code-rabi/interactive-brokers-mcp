@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -96,5 +97,105 @@ describe("OrderIdempotencyStore", () => {
     const serialized = await readFile(file, "utf8");
 
     expect(serialized).not.toMatch(/password|cookie|token|credential/i);
+  });
+
+  it("recovers when a real process dies after creating an empty lock", async () => {
+    const file = await makeStorePath();
+    const lockPath = `${file}.lock`;
+    const child = spawn(process.execPath, [
+      "-e",
+      "require('fs').openSync(process.argv[1], 'wx', 0o600); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
+      lockPath,
+    ], { stdio: ["ignore", "pipe", "inherit"] });
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.stdout!.once("data", () => resolve());
+    });
+    child.kill("SIGKILL");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+
+    const store = new OrderIdempotencyStore(file, { lockInitializationGraceMs: 25 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const reservation = await store.reserve(request);
+
+    expect(reservation.owner).toBe(true);
+  });
+
+  it("fsyncs the parent directory after rename", async () => {
+    const file = await makeStorePath();
+    const events: string[] = [];
+    const store = new OrderIdempotencyStore(file, {
+      fileSystem: {
+        open: async (target, flags, mode) => {
+          const handle = await open(target, flags, mode);
+          if (target === path.dirname(file)) {
+            const originalSync = handle.sync.bind(handle);
+            handle.sync = async () => {
+              events.push("parent-sync");
+              return originalSync();
+            };
+          }
+          return handle;
+        },
+        rename: async (source, destination) => {
+          events.push("rename");
+          await (await import("node:fs/promises")).rename(source, destination);
+        },
+      },
+    });
+
+    await store.reserve(request);
+
+    expect(events).toEqual(["rename", "parent-sync"]);
+  });
+
+  it("removes temp files when temp fsync fails", async () => {
+    const file = await makeStorePath();
+    const store = new OrderIdempotencyStore(file, {
+      fileSystem: {
+        open: async (target, flags, mode) => {
+          const handle = await open(target, flags, mode);
+          if (target.endsWith(".tmp")) {
+            handle.sync = async () => { throw new Error("injected temp fsync failure"); };
+          }
+          return handle;
+        },
+      },
+    });
+
+    await expect(store.reserve(request)).rejects.toThrow("injected temp fsync failure");
+    expect((await readdir(path.dirname(file))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("removes its lock when lock metadata fsync fails", async () => {
+    const file = await makeStorePath();
+    const lockPath = `${file}.lock`;
+    const store = new OrderIdempotencyStore(file, {
+      fileSystem: {
+        open: async (target, flags, mode) => {
+          const handle = await open(target, flags, mode);
+          if (target === lockPath) {
+            handle.sync = async () => { throw new Error("injected lock fsync failure"); };
+          }
+          return handle;
+        },
+      },
+    });
+
+    await expect(store.reserve(request)).rejects.toThrow("injected lock fsync failure");
+    expect(await readdir(path.dirname(file))).not.toContain(path.basename(lockPath));
+  });
+
+  it("tightens existing store directory and data file permissions", async () => {
+    const file = await makeStorePath();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, `${JSON.stringify({ version: 1, records: {} })}\n`, { mode: 0o644 });
+    await chmod(path.dirname(file), 0o755);
+    await chmod(file, 0o644);
+
+    await new OrderIdempotencyStore(file).reserve(request);
+
+    expect((await stat(path.dirname(file))).mode & 0o777).toBe(0o700);
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
   });
 });

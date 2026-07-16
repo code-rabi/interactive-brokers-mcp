@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import {
+  mkdir as fsMkdir,
+  chmod as fsChmod,
+  open as fsOpen,
+  readFile as fsReadFile,
+  rename as fsRename,
+  stat as fsStat,
+  unlink as fsUnlink,
+} from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { OrderRequest } from "./ib-client/types.js";
@@ -28,6 +37,38 @@ interface StoreDocument {
 
 const EMPTY_STORE: StoreDocument = { version: 1, records: {} };
 const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_INITIALIZATION_GRACE_MS = 1_000;
+
+interface OrderStoreFileSystem {
+  chmod: typeof fsChmod;
+  mkdir: typeof fsMkdir;
+  open: typeof fsOpen;
+  readFile: typeof fsReadFile;
+  rename: typeof fsRename;
+  stat: typeof fsStat;
+  unlink: typeof fsUnlink;
+}
+
+export interface OrderIdempotencyStoreOptions {
+  fileSystem?: Partial<OrderStoreFileSystem>;
+  lockInitializationGraceMs?: number;
+}
+
+interface LockOwnership {
+  handle: FileHandle;
+  inode: number;
+  metadata: string;
+}
+
+const defaultFileSystem: OrderStoreFileSystem = {
+  chmod: fsChmod,
+  mkdir: fsMkdir,
+  open: fsOpen,
+  readFile: fsReadFile,
+  rename: fsRename,
+  stat: fsStat,
+  unlink: fsUnlink,
+};
 
 export class OrderIdempotencyConflictError extends Error {
   constructor(clientOrderId: string) {
@@ -67,10 +108,18 @@ export function defaultOrderIdempotencyStorePath(): string {
 export class OrderIdempotencyStore {
   readonly filePath: string;
   private readonly lockPath: string;
+  private readonly fileSystem: OrderStoreFileSystem;
+  private readonly lockInitializationGraceMs: number;
 
-  constructor(filePath = defaultOrderIdempotencyStorePath()) {
+  constructor(
+    filePath = defaultOrderIdempotencyStorePath(),
+    options: OrderIdempotencyStoreOptions = {},
+  ) {
     this.filePath = filePath;
     this.lockPath = `${filePath}.lock`;
+    this.fileSystem = { ...defaultFileSystem, ...options.fileSystem };
+    this.lockInitializationGraceMs = options.lockInitializationGraceMs
+      ?? LOCK_INITIALIZATION_GRACE_MS;
   }
 
   async reserve(order: OrderRequest): Promise<OrderReservation> {
@@ -135,7 +184,11 @@ export class OrderIdempotencyStore {
   private async withLock<T>(
     operation: (document: StoreDocument) => Promise<{ value: T; changed: boolean }>,
   ): Promise<T> {
-    await mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    await this.fileSystem.mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    await this.fileSystem.chmod(path.dirname(this.filePath), 0o700);
+    await this.fileSystem.chmod(this.filePath, 0o600).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
     const lock = await this.acquireLock();
     try {
       const document = await this.readDocument();
@@ -143,36 +196,35 @@ export class OrderIdempotencyStore {
       if (result.changed) await this.writeDocument(document);
       return result.value;
     } finally {
-      await lock.close();
-      await unlink(this.lockPath).catch(() => undefined);
+      await this.releaseLock(lock);
     }
   }
 
-  private async acquireLock() {
+  private async acquireLock(): Promise<LockOwnership> {
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     while (true) {
       try {
-        const handle = await open(this.lockPath, "wx", 0o600);
+        const handle = await this.fileSystem.open(this.lockPath, "wx", 0o600);
+        const inode = Number((await handle.stat()).ino);
+        const metadata = JSON.stringify({ pid: process.pid, token: randomUUID() });
         try {
-          await handle.writeFile(String(process.pid), "utf8");
+          await handle.writeFile(metadata, "utf8");
           await handle.sync();
-          return handle;
+          return { handle, inode, metadata };
         } catch (error) {
           await handle.close();
-          await unlink(this.lockPath).catch(() => undefined);
+          await this.unlinkOwnedInode(inode).catch(() => undefined);
           throw error;
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         try {
-          const ownerPid = Number.parseInt(await readFile(this.lockPath, "utf8"), 10);
-          if (Number.isInteger(ownerPid) && !this.isProcessAlive(ownerPid)) {
-            await unlink(this.lockPath);
+          if (await this.recoverAbandonedLock()) {
             continue;
           }
-        } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw statError;
+        } catch (recoveryError) {
+          if ((recoveryError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw recoveryError;
         }
         if (Date.now() >= deadline) {
           throw new Error(`Timed out waiting for order store lock ${this.lockPath}`, { cause: error });
@@ -180,6 +232,52 @@ export class OrderIdempotencyStore {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
+  }
+
+  private async recoverAbandonedLock(): Promise<boolean> {
+    const initialStat = await this.fileSystem.stat(this.lockPath);
+    if (Date.now() - initialStat.mtimeMs < this.lockInitializationGraceMs) return false;
+
+    const metadata = await this.fileSystem.readFile(this.lockPath, "utf8");
+    let owner: { pid?: unknown; token?: unknown } | undefined;
+    try {
+      owner = JSON.parse(metadata) as { pid?: unknown; token?: unknown };
+    } catch {
+      owner = undefined;
+    }
+    if (
+      owner
+      && Number.isInteger(owner.pid)
+      && typeof owner.token === "string"
+      && this.isProcessAlive(owner.pid as number)
+    ) {
+      return false;
+    }
+    return this.unlinkIfUnchanged(Number(initialStat.ino), metadata);
+  }
+
+  private async releaseLock(lock: LockOwnership): Promise<void> {
+    await lock.handle.close();
+    await this.unlinkIfUnchanged(lock.inode, lock.metadata);
+  }
+
+  private async unlinkIfUnchanged(expectedInode: number, expectedMetadata: string): Promise<boolean> {
+    const before = await this.fileSystem.stat(this.lockPath);
+    if (Number(before.ino) !== expectedInode) return false;
+    const metadata = await this.fileSystem.readFile(this.lockPath, "utf8");
+    const after = await this.fileSystem.stat(this.lockPath);
+    if (Number(after.ino) !== expectedInode || metadata !== expectedMetadata) return false;
+    await this.fileSystem.unlink(this.lockPath);
+    return true;
+  }
+
+  private async unlinkOwnedInode(expectedInode: number): Promise<boolean> {
+    const before = await this.fileSystem.stat(this.lockPath);
+    if (Number(before.ino) !== expectedInode) return false;
+    const after = await this.fileSystem.stat(this.lockPath);
+    if (Number(after.ino) !== expectedInode) return false;
+    await this.fileSystem.unlink(this.lockPath);
+    return true;
   }
 
   private isProcessAlive(pid: number): boolean {
@@ -193,7 +291,7 @@ export class OrderIdempotencyStore {
 
   private async readDocument(): Promise<StoreDocument> {
     try {
-      const parsed = JSON.parse(await readFile(this.filePath, "utf8")) as StoreDocument;
+      const parsed = JSON.parse(await this.fileSystem.readFile(this.filePath, "utf8")) as StoreDocument;
       if (parsed.version !== 1 || !parsed.records || typeof parsed.records !== "object") {
         throw new Error(`Invalid order idempotency store at ${this.filePath}`);
       }
@@ -208,18 +306,29 @@ export class OrderIdempotencyStore {
 
   private async writeDocument(document: StoreDocument): Promise<void> {
     const tempPath = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
-    const handle = await open(tempPath, "wx", 0o600);
+    const handle = await this.fileSystem.open(tempPath, "wx", 0o600);
+    let renamed = false;
     try {
       await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
       await handle.sync();
-    } finally {
       await handle.close();
-    }
-    try {
-      await rename(tempPath, this.filePath);
+      await this.fileSystem.rename(tempPath, this.filePath);
+      renamed = true;
+      await this.fileSystem.chmod(this.filePath, 0o600);
+      await this.syncParentDirectory();
     } catch (error) {
-      await unlink(tempPath).catch(() => undefined);
+      await handle.close().catch(() => undefined);
+      if (!renamed) await this.fileSystem.unlink(tempPath).catch(() => undefined);
       throw error;
+    }
+  }
+
+  private async syncParentDirectory(): Promise<void> {
+    const directory = await this.fileSystem.open(path.dirname(this.filePath), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
     }
   }
 }

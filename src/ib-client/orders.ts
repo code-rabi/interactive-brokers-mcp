@@ -29,10 +29,31 @@ export class OrderSubmissionError extends Error {
     super(options.message, { cause: options.cause });
     this.name = "OrderSubmissionError";
     this.status = options.status;
-    this.ibkrBody = options.ibkrBody;
+    Object.defineProperty(this, "ibkrBody", {
+      value: options.ibkrBody,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
     this.transportCode = options.transportCode;
     this.submissionUncertain = options.submissionUncertain;
   }
+}
+
+function isExplicitBrokerRejection(status: number, body: unknown): boolean {
+  if (status < 400 || status >= 500 || status === 408 || status === 425 || status === 429) {
+    return false;
+  }
+  const candidates = Array.isArray(body) ? body : [body];
+  return candidates.some((candidate) => {
+    if (!candidate || typeof candidate !== "object") return false;
+    const value = candidate as Record<string, unknown>;
+    const code = value.errorCode ?? value.error_code ?? value.code;
+    const message = value.error ?? value.message;
+    return (typeof code === "number" || typeof code === "string")
+      && typeof message === "string"
+      && /reject|invalid|insufficient|not allowed|cannot|exceed/i.test(message);
+  });
 }
 
 async function fetchAuthoritativeContract(
@@ -89,11 +110,14 @@ async function submitOrder(
     return response.data;
   } catch (error) {
     if (error instanceof HttpError) {
+      const definiteRejection = isExplicitBrokerRejection(error.response.status, error.response.data);
       throw new OrderSubmissionError({
-        message: `IBKR rejected order submission with HTTP status ${error.response.status}`,
+        message: definiteRejection
+          ? `IBKR explicitly rejected order submission with HTTP status ${error.response.status}`
+          : `Order submission outcome is uncertain after HTTP status ${error.response.status}`,
         status: error.response.status,
         ibkrBody: error.response.data,
-        submissionUncertain: false,
+        submissionUncertain: !definiteRejection,
         cause: error,
       });
     }
@@ -214,7 +238,16 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
     if (orderRequest.exchange) order.exchange = orderRequest.exchange;
     return submitOrder(client, orderRequest.accountId, order);
   } catch (error: unknown) {
-    Logger.error("Failed to place order:", error);
+    if (error instanceof OrderSubmissionError) {
+      Logger.error("Failed to place order:", {
+        name: error.name,
+        status: error.status,
+        transportCode: error.transportCode,
+        submissionUncertain: error.submissionUncertain,
+      });
+    } else {
+      Logger.error("Failed to place order:", error);
+    }
     if (isAuthenticationError(error)) {
       throw new AuthenticationError("Authentication required to place orders. Please authenticate with Interactive Brokers first.");
     }

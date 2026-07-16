@@ -76,10 +76,12 @@ export class IBClient {
     options?: RequestOptions,
   ): Promise<HttpResponse<T>> {
     const requestId = Math.random().toString(36).substr(2, 9);
+    const isOrderSubmission = method.toUpperCase() === "POST"
+      && /^\/iserver\/account\/[^/]+\/orders$/.test(urlPath);
     Logger.log(`[REQUEST-${requestId}] ${method} ${urlPath}`, {
       timeout: options?.timeout ?? 30000,
       headers: options?.headers,
-      data: options?.body,
+      data: isOrderSubmission ? "[REDACTED ORDER REQUEST]" : options?.body,
     });
 
     if (!this.isAuthenticated) {
@@ -95,7 +97,9 @@ export class IBClient {
       Logger.log(`[RESPONSE-${requestId}] ${result.status} ${result.statusText}`, {
         url: urlPath,
         responseSize: JSON.stringify(result.data).length,
-        dataPreview: JSON.stringify(result.data).substring(0, 500) + "...",
+        dataPreview: isOrderSubmission
+          ? "[REDACTED ORDER RESPONSE]"
+          : JSON.stringify(result.data).substring(0, 500) + "...",
       });
       return result;
     } catch (error: unknown) {
@@ -105,7 +109,7 @@ export class IBClient {
           status: error.response.status,
           statusText: error.response.statusText,
           message: error.message,
-          responseData: error.response.data,
+          responseData: isOrderSubmission ? "[REDACTED ORDER RESPONSE]" : error.response.data,
         });
       } else {
         Logger.error(`[ERROR-${requestId}] Request failed:`, error instanceof Error ? error.message : String(error));
