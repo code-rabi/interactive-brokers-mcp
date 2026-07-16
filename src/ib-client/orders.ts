@@ -11,8 +11,16 @@ import {
   isAuthenticationError,
 } from "./types.js";
 
-function isStockSearchResult(contract: ContractSearch): boolean {
-  return contract.secType === "STK" || contract.sections?.some((section) => section.secType === "STK") === true;
+async function fetchAuthoritativeContract(
+  client: IBClientRequester,
+  conid: number,
+): Promise<ContractSearch> {
+  const response = await client.request<ContractSearch>("GET", `/iserver/contract/${conid}/info`);
+  const contract = response.data;
+  if (!contract || Number(contract.conid) !== conid) {
+    throw new InvalidOrderContractError(`Contract ${conid} returned mismatched authoritative metadata`);
+  }
+  return contract;
 }
 
 async function resolveAuthoritativeStock(
@@ -20,9 +28,8 @@ async function resolveAuthoritativeStock(
   conid: number,
   expectedSymbol?: string,
 ): Promise<ContractSearch> {
-  const response = await client.request<ContractSearch>("GET", `/iserver/contract/${conid}/info`);
-  const contract = response.data;
-  if (!contract || Number(contract.conid) !== conid || contract.secType !== "STK") {
+  const contract = await fetchAuthoritativeContract(client, conid);
+  if (contract.secType !== "STK") {
     throw new InvalidOrderContractError(`Contract ${conid} is not an authoritative STK stock contract`);
   }
   if (expectedSymbol && contract.symbol.toUpperCase() !== expectedSymbol.toUpperCase()) {
@@ -120,18 +127,20 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
       throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? " on " + orderRequest.exchange : ""} not found`);
     }
 
-    const stockCandidates = searchResponse.data.filter(isStockSearchResult);
+    const candidateConids = [...new Set(searchResponse.data.map((candidate) => Number(candidate.conid)))];
+    const authoritativeCandidates = await Promise.all(
+      candidateConids.map((conid) => fetchAuthoritativeContract(client, conid)),
+    );
+    const stockCandidates = authoritativeCandidates.filter(
+      (candidate) => candidate.secType === "STK"
+        && candidate.symbol.toUpperCase() === orderRequest.symbol!.toUpperCase(),
+    );
     if (stockCandidates.length !== 1) {
       const reason = stockCandidates.length === 0 ? "no STK stock contract" : "ambiguous STK stock contracts";
       throw new InvalidOrderContractError(`Symbol ${orderRequest.symbol} resolved to ${reason}`);
     }
 
-    const searchContract = stockCandidates[0];
-    const contract = await resolveAuthoritativeStock(
-      client,
-      Number(searchContract.conid),
-      orderRequest.symbol,
-    );
+    const contract = stockCandidates[0];
     const order: OrderPayload = {
       conid: Number(contract.conid),
       cOID: orderRequest.clientOrderId,

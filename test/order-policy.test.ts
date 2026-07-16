@@ -37,6 +37,11 @@ describe("OrderPolicy", () => {
     expect(() => policy.validatePlaceOrder(validOrder)).not.toThrow();
   });
 
+  it("requires either symbol or conid", () => {
+    const policy = new OrderPolicy({ IB_READ_ONLY_MODE: false, IB_ALLOWED_ACCOUNT_ID: "U12345" });
+    expect(() => policy.validatePlaceOrder({ ...validOrder, symbol: undefined })).toThrow(/symbol or conid/i);
+  });
+
   it.each([
     ["market order", { orderType: "MKT" }],
     ["stop order", { orderType: "STP", stopPrice: 180 }],

@@ -33,6 +33,10 @@ describe('Tool Definitions - Zod Schemas', () => {
       }).success).toBe(true);
     });
 
+    it('leaves the symbol-or-conid cross-field rule to the order policy', () => {
+      expect(PlaceOrderZodSchema.safeParse({ ...validLimitOrder, symbol: undefined }).success).toBe(true);
+    });
+
     it.each([
       ['MKT', { orderType: 'MKT' }],
       ['STP', { orderType: 'STP', stopPrice: 140 }],

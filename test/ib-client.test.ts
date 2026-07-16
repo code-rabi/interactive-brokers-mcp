@@ -517,10 +517,13 @@ describe('IBClient', () => {
       });
 
       it('should reject ambiguous stock symbol search results', async () => {
-        mockFetch.mockResolvedValueOnce(mockResponse([
-          { conid: 265598, symbol: 'ABC', sections: [{ secType: 'STK' }] },
-          { conid: 765432, symbol: 'ABC', sections: [{ secType: 'STK' }] },
-        ]));
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([
+            { conid: 265598, symbol: 'ABC', sections: [{ secType: 'STK' }] },
+            { conid: 765432, symbol: 'ABC', sections: [{ secType: 'STK' }] },
+          ]))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'ABC', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 765432, symbol: 'ABC', secType: 'STK' }));
 
         await expect(client.placeOrder({
           clientOrderId: 'codex-ambiguous-symbol',
@@ -535,10 +538,36 @@ describe('IBClient', () => {
         expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
       });
 
+      it('should reject ambiguity revealed only by authoritative metadata', async () => {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([
+            { conid: 265598, symbol: 'ABC', sections: [{ secType: 'STK' }] },
+            { conid: 765432, symbol: 'ABC', sections: [{ secType: 'OPT' }] },
+          ]))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'ABC', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 765432, symbol: 'ABC', secType: 'STK' }));
+
+        await expect(client.placeOrder({
+          clientOrderId: 'codex-authoritative-ambiguity',
+          accountId: 'U12345',
+          symbol: 'ABC',
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        })).rejects.toThrow(/ambiguous|stock/i);
+
+        expect(findCall('/iserver/contract/265598/info')).toBeDefined();
+        expect(findCall('/iserver/contract/765432/info')).toBeDefined();
+        expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
+      });
+
       it('should reject non-stock symbol search results', async () => {
-        mockFetch.mockResolvedValueOnce(mockResponse([
-          { conid: 912345678, symbol: 'AAPL', sections: [{ secType: 'OPT' }] },
-        ]));
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([
+            { conid: 912345678, symbol: 'AAPL', sections: [{ secType: 'OPT' }] },
+          ]))
+          .mockResolvedValueOnce(mockResponse({ conid: 912345678, symbol: 'AAPL', secType: 'OPT' }));
 
         await expect(client.placeOrder({
           clientOrderId: 'codex-non-stock-symbol',

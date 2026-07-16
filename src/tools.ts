@@ -41,15 +41,14 @@ export function registerTools(
   };
 
   const handlers = new ToolHandlers(context);
-  // The SDK's generic registerTool signature recursively expands refined Zod
-  // effects beyond TypeScript's instantiation limit. Keep the runtime schema
-  // intact and narrow only the registration boundary.
+  // SDK type inference recursively expands transformed numeric fields beyond
+  // TypeScript's limit. This assertion changes only the registration type;
+  // the strict ZodObject is passed through unchanged at runtime.
   const registerPlaceOrder = server.registerTool.bind(server) as unknown as (
     name: string,
     config: { description: string; inputSchema: typeof PlaceOrderZodSchema },
     handler: (args: PlaceOrderInput) => ReturnType<ToolHandlers["placeOrder"]>,
   ) => unknown;
-
   const registerTool = (
     name: string,
     description: string,

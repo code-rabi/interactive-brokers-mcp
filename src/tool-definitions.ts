@@ -129,19 +129,7 @@ export const GetOptionChainZodSchema = z.object(GetOptionChainZodShape);
 export const ResolveOptionConidZodSchema = z.object(ResolveOptionConidZodShape);
 export const GetMarketDataZodSchema = z.object(GetMarketDataZodShape);
 
-export const PlaceOrderZodSchema = z
-  .object(PlaceOrderZodShape)
-  .strict()
-  .superRefine((data, ctx) => {
-    if (!data.symbol && data.conid === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Either symbol or conid is required",
-        path: ["symbol"]
-      });
-    }
-
-  });
+export const PlaceOrderZodSchema = z.object(PlaceOrderZodShape).strict();
 
 export const GetOrderStatusZodSchema = z.object(GetOrderStatusZodShape);
 export const GetLiveOrdersZodSchema = z.object(GetLiveOrdersZodShape);

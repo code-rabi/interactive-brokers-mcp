@@ -72,6 +72,51 @@ describe("read-only safety defaults", () => {
 });
 
 describe("place_order MCP entrypoint validation", () => {
+  it("publishes the complete object contract through tools/list", async () => {
+    const server = new McpServer({ name: "test-server", version: "1.0.0" });
+    const ibClient = {} as IBClient;
+    registerTools(server, ibClient, undefined, {
+      IB_READ_ONLY_MODE: false,
+      IB_ALLOWED_ACCOUNT_ID: "U12345",
+    });
+
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const { tools } = await client.listTools();
+      const placeOrder = tools.find((tool) => tool.name === "place_order");
+
+      expect(placeOrder?.inputSchema.type).toBe("object");
+      expect(Object.keys(placeOrder?.inputSchema.properties ?? {})).toEqual(expect.arrayContaining([
+        "clientOrderId",
+        "accountId",
+        "symbol",
+        "conid",
+        "action",
+        "orderType",
+        "quantity",
+        "price",
+        "exchange",
+        "tif",
+      ]));
+      expect(placeOrder?.inputSchema.required).toEqual(expect.arrayContaining([
+        "clientOrderId",
+        "accountId",
+        "action",
+        "orderType",
+        "quantity",
+        "price",
+      ]));
+      expect(placeOrder?.inputSchema.additionalProperties).toBe(false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it.each(["secType", "expiry", "right", "suppressConfirmations"])(
     "rejects forbidden field %s instead of stripping it",
     async (field) => {

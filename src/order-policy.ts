@@ -33,6 +33,9 @@ export class OrderPolicy {
 
   validatePlaceOrder(input: unknown): PlaceOrderInput {
     const order = PlaceOrderZodSchema.parse(input);
+    if (!order.symbol && order.conid === undefined) {
+      throw new Error("Either symbol or conid is required");
+    }
     this.assertAllowedAccount(order.accountId);
     return order;
   }
