@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerTools } from "../src/tools.js";
 import { IBClient } from "../src/ib-client.js";
 import { IBGatewayManager } from "../src/gateway-manager.js";
@@ -25,6 +27,10 @@ describe("read-only safety defaults", () => {
     registeredTools = [];
     mockMcpServer = {
       tool: vi.fn().mockImplementation((name) => {
+        registeredTools.push(name);
+        return mockMcpServer;
+      }),
+      registerTool: vi.fn().mockImplementation((name) => {
         registeredTools.push(name);
         return mockMcpServer;
       }),
@@ -63,4 +69,49 @@ describe("read-only safety defaults", () => {
     });
     for (const tool of WRITE_TOOLS) expect(registeredTools).toContain(tool);
   });
+});
+
+describe("place_order MCP entrypoint validation", () => {
+  it.each(["secType", "expiry", "right", "suppressConfirmations"])(
+    "rejects forbidden field %s instead of stripping it",
+    async (field) => {
+      const server = new McpServer({ name: "test-server", version: "1.0.0" });
+      const ibClient = {
+        checkAuthenticationStatus: vi.fn().mockResolvedValue(true),
+        placeOrder: vi.fn().mockResolvedValue({ orderId: "unsafe" }),
+      } as unknown as IBClient;
+      registerTools(server, ibClient, undefined, {
+        IB_READ_ONLY_MODE: false,
+        IB_ALLOWED_ACCOUNT_ID: "U12345",
+      });
+
+      const client = new Client({ name: "test-client", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+
+      try {
+        const result = await client.callTool({
+          name: "place_order",
+          arguments: {
+            clientOrderId: `forbidden-${field}`,
+            accountId: "U12345",
+            symbol: "AAPL",
+            action: "BUY",
+            orderType: "LMT",
+            quantity: 1,
+            price: 150,
+            [field]: field === "suppressConfirmations" ? true : "forbidden",
+          },
+        });
+
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toMatch(/unrecognized|invalid/i);
+        expect(ibClient.placeOrder).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    },
+  );
 });

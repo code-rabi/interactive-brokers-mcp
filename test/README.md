@@ -25,7 +25,7 @@ Global test setup file that configures the test environment, mocks, and cleanup.
 
 ### `test/tool-definitions.test.ts`
 Tests for Zod schemas and validation:
-- Order validation (market, limit, stop orders)
+- Order validation (strict allowlisted limit-stock orders)
 - Fractional share quantity support
 - Required field validation
 - Schema refinements
@@ -69,4 +69,3 @@ When adding new features:
 2. Add tests for IBClient methods in `ib-client.test.ts`
 3. Add tests for tool handlers in `tool-handlers.test.ts`
 4. Ensure all tests pass before committing: `npm test`
-

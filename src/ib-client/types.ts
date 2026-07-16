@@ -22,6 +22,7 @@ export interface ContractSection {
 export interface ContractSearch {
   conid: number | string;
   symbol: string;
+  secType?: string;
   description?: string;
   companyHeader?: string;
   sections?: ContractSection[];
@@ -115,6 +116,13 @@ export class SymbolNotFoundError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SymbolNotFoundError";
+  }
+}
+
+export class InvalidOrderContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidOrderContractError";
   }
 }
 

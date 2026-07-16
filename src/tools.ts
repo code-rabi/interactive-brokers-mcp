@@ -19,7 +19,8 @@ import {
   GetOrderStatusZodShape,
   GetPositionsZodShape,
   ListFlexQueriesZodShape,
-  PlaceOrderZodShape,
+  PlaceOrderZodSchema,
+  type PlaceOrderInput,
   ResolveOptionConidZodShape,
 } from "./tool-definitions.js";
 
@@ -40,6 +41,14 @@ export function registerTools(
   };
 
   const handlers = new ToolHandlers(context);
+  // The SDK's generic registerTool signature recursively expands refined Zod
+  // effects beyond TypeScript's instantiation limit. Keep the runtime schema
+  // intact and narrow only the registration boundary.
+  const registerPlaceOrder = server.registerTool.bind(server) as unknown as (
+    name: string,
+    config: { description: string; inputSchema: typeof PlaceOrderZodSchema },
+    handler: (args: PlaceOrderInput) => ReturnType<ToolHandlers["placeOrder"]>,
+  ) => unknown;
 
   const registerTool = (
     name: string,
@@ -93,10 +102,12 @@ export function registerTools(
   );
 
   if (writeEnabled) {
-    registerTool(
+    registerPlaceOrder(
       "place_order",
-      "Place a limit stock order. Usage: `{ \"clientOrderId\":\"unique-id\",\"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`.",
-      PlaceOrderZodShape,
+      {
+        description: "Place a limit stock order. The symbol or conid must resolve unambiguously to an authoritative STK contract. Usage: `{ \"clientOrderId\":\"unique-id\",\"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`.",
+        inputSchema: PlaceOrderZodSchema,
+      },
       async (args) => await handlers.placeOrder(args),
     );
   }
@@ -111,7 +122,7 @@ export function registerTools(
   registerTool(
     "get_live_orders",
     "Get all live/open orders for monitoring and validation. Usage: `{}` for all accounts or `{ \"accountId\": \"<id>\" }` for a specific account. " +
-      "This is the recommended way to validate that market orders were executed successfully after placing them.",
+      "Use this to monitor and validate submitted limit orders.",
     GetLiveOrdersZodShape,
     async (args) => await handlers.getLiveOrders(args),
   );

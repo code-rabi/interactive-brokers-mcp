@@ -1,6 +1,5 @@
 import { Logger } from "../logger.js";
 import type { IBClientRequester } from "./accounts.js";
-import { resolveContract } from "./options.js";
 import {
   type ContractSearch,
   type OrderPayload,
@@ -8,8 +7,31 @@ import {
   type OrderRequest,
   AuthenticationError,
   SymbolNotFoundError,
+  InvalidOrderContractError,
   isAuthenticationError,
 } from "./types.js";
+
+function isStockSearchResult(contract: ContractSearch): boolean {
+  return contract.secType === "STK" || contract.sections?.some((section) => section.secType === "STK") === true;
+}
+
+async function resolveAuthoritativeStock(
+  client: IBClientRequester,
+  conid: number,
+  expectedSymbol?: string,
+): Promise<ContractSearch> {
+  const response = await client.request<ContractSearch>("GET", `/iserver/contract/${conid}/info`);
+  const contract = response.data;
+  if (!contract || Number(contract.conid) !== conid || contract.secType !== "STK") {
+    throw new InvalidOrderContractError(`Contract ${conid} is not an authoritative STK stock contract`);
+  }
+  if (expectedSymbol && contract.symbol.toUpperCase() !== expectedSymbol.toUpperCase()) {
+    throw new InvalidOrderContractError(
+      `Contract ${conid} symbol ${contract.symbol} does not match requested stock ${expectedSymbol}`,
+    );
+  }
+  return contract;
+}
 
 function normalizeAccountId(account: unknown): string | undefined {
   if (!account) return undefined;
@@ -65,9 +87,9 @@ async function getOrderAccountIds(client: IBClientRequester): Promise<string[]> 
 export async function placeOrder(client: IBClientRequester, orderRequest: OrderRequest): Promise<unknown> {
   try {
     if (orderRequest.conid !== undefined) {
-      const contract = await resolveContract(client, orderRequest);
+      const contract = await resolveAuthoritativeStock(client, orderRequest.conid, orderRequest.symbol);
       const order: OrderPayload = {
-        conid: contract.conid,
+        conid: Number(contract.conid),
         cOID: orderRequest.clientOrderId,
         orderType: orderRequest.orderType,
         side: orderRequest.action,
@@ -98,7 +120,18 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
       throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? " on " + orderRequest.exchange : ""} not found`);
     }
 
-    const contract = searchResponse.data[0];
+    const stockCandidates = searchResponse.data.filter(isStockSearchResult);
+    if (stockCandidates.length !== 1) {
+      const reason = stockCandidates.length === 0 ? "no STK stock contract" : "ambiguous STK stock contracts";
+      throw new InvalidOrderContractError(`Symbol ${orderRequest.symbol} resolved to ${reason}`);
+    }
+
+    const searchContract = stockCandidates[0];
+    const contract = await resolveAuthoritativeStock(
+      client,
+      Number(searchContract.conid),
+      orderRequest.symbol,
+    );
     const order: OrderPayload = {
       conid: Number(contract.conid),
       cOID: orderRequest.clientOrderId,
@@ -121,6 +154,7 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
       throw new AuthenticationError("Authentication required to place orders. Please authenticate with Interactive Brokers first.");
     }
     if (error instanceof SymbolNotFoundError) throw error;
+    if (error instanceof InvalidOrderContractError) throw error;
     throw new Error("Failed to place order");
   }
 }

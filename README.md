@@ -22,7 +22,7 @@ your IB account to retrieve market data, check positions, and place trades.
 
 ## Features
 
-- **Interactive Brokers API Integration**: Full trading capabilities including account management, position tracking, real-time market data, and order management (market, limit, and stop orders)
+- **Interactive Brokers API Integration**: Account management, position tracking, real-time market data, and guarded limit-stock order placement
 - **Flex Query Support**: Execute Flex Queries to retrieve account statements, trade confirmations, and historical data. Queries are automatically remembered for easy reuse
 - **Flexible Authentication**: Choose between browser-based OAuth authentication or headless mode with credentials for automated environments, including fully automated TOTP 2FA override. See [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for detailed configuration and important risk warnings.
 - **Simple Setup**: Run directly with `npx` - no Docker or additional installations required. Includes pre-configured IB Gateway and Java runtime for all platforms
@@ -192,12 +192,21 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 | Force standalone bundled gateway | `IB_FORCE_STANDALONE_GATEWAY` | N/A |
 | Flex Token | `IB_FLEX_TOKEN` | N/A |
 | Read-only mode | `IB_READ_ONLY_MODE` | `--ib-read-only-mode` |
+| Allowed live-write account | `IB_ALLOWED_ACCOUNT_ID` | `--ib-allowed-account-id` |
 | 2FA Strategy | `IB_TWO_FA_STRATEGY` | N/A |
 | TOTP Secret Key | `IB_TOTP_SECRET` | N/A |
 | Login page selector overrides | `IB_SELECTOR_USERNAME`, `IB_SELECTOR_PASSWORD`, `IB_SELECTOR_LOGIN_SUBMIT` | N/A |
 | TOTP form selector overrides | `IB_SELECTOR_TOTP_INPUT`, `IB_SELECTOR_TOTP_SUBMIT` | N/A |
 
 See the [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for details on the 2FA and selector-override variables.
+
+The server is read-only by default. Live write tools are registered only when
+`IB_READ_ONLY_MODE=false` is set explicitly and `IB_ALLOWED_ACCOUNT_ID` names
+the single account permitted for writes. `place_order` accepts limit (`LMT`)
+stock orders only; market, stop, and option orders are rejected. Every order
+must provide a unique `clientOrderId`, a positive finite quantity and price,
+and either a symbol or conid that IBKR resolves unambiguously to a `STK`
+contract.
 
 ## Gateway Lifecycle
 
@@ -222,7 +231,7 @@ To reset the managed Gateway session, stop the Gateway process recorded in `ib-g
 | `get_account_info` | Retrieve account information and balances |
 | `get_positions`    | Get current positions and P&L             |
 | `get_market_data`  | Real-time market data for symbols         |
-| `place_order`      | Place market, limit, or stop orders (only if read-only mode is disabled) |
+| `place_order`      | Place limit stock orders for the allowlisted account (only when live writes are explicitly enabled) |
 | `get_order_status` | Check order execution status              |
 | `get_live_orders`  | Get all live/open orders for monitoring   |
 

@@ -24,12 +24,13 @@ import {
   type OrderRequest,
   type TickleResponse,
   SymbolNotFoundError,
+  InvalidOrderContractError,
 } from "./ib-client/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-export { SymbolNotFoundError };
+export { SymbolNotFoundError, InvalidOrderContractError };
 
 // ---------------------------------------------------------------------------
 // Client
