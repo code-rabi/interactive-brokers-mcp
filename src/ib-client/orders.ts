@@ -64,38 +64,24 @@ async function getOrderAccountIds(client: IBClientRequester): Promise<string[]> 
 
 export async function placeOrder(client: IBClientRequester, orderRequest: OrderRequest): Promise<unknown> {
   try {
-    if (orderRequest.conid !== undefined || orderRequest.secType === "OPT") {
+    if (orderRequest.conid !== undefined) {
       const contract = await resolveContract(client, orderRequest);
       const order: OrderPayload = {
         conid: contract.conid,
+        cOID: orderRequest.clientOrderId,
         orderType: orderRequest.orderType,
         side: orderRequest.action,
         quantity: Number(orderRequest.quantity),
+        price: Number(orderRequest.price),
         tif: orderRequest.tif || "DAY",
       };
 
       if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-      if (contract.secType === "OPT" || orderRequest.secType === "OPT") order.secType = "OPT";
-      if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
-        order.price = Number(orderRequest.price);
-      }
-      if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) {
-        order.auxPrice = Number(orderRequest.stopPrice);
-      }
-
       const response = await client.request<OrderConfirmation[]>(
         "POST",
         `/iserver/account/${orderRequest.accountId}/orders`,
         { body: { orders: [order] } },
       );
-
-      if (Array.isArray(response.data) && response.data.length > 0) {
-        const first = response.data[0];
-        if (first.id && first.message && first.messageIds && orderRequest.suppressConfirmations) {
-          Logger.log("Order confirmation received, auto-confirming", first);
-          return await confirmOrder(client, first.id, first.messageIds);
-        }
-      }
 
       return response.data;
     }
@@ -115,27 +101,19 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
     const contract = searchResponse.data[0];
     const order: OrderPayload = {
       conid: Number(contract.conid),
+      cOID: orderRequest.clientOrderId,
       orderType: orderRequest.orderType,
       side: orderRequest.action,
       quantity: Number(orderRequest.quantity),
+      price: Number(orderRequest.price),
       tif: orderRequest.tif || "DAY",
     };
     if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-    if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) order.price = Number(orderRequest.price);
-    if (orderRequest.orderType === "STP" && orderRequest.stopPrice !== undefined) order.auxPrice = Number(orderRequest.stopPrice);
-
     const response = await client.request<OrderConfirmation[]>("POST",
       `/iserver/account/${orderRequest.accountId}/orders`,
       { body: { orders: [order] } },
     );
 
-    if (Array.isArray(response.data) && response.data.length > 0) {
-      const first = response.data[0];
-      if (first.id && first.message && first.messageIds && orderRequest.suppressConfirmations) {
-        Logger.log("Order confirmation received, automatically confirming...", first);
-        return await confirmOrder(client, first.id, first.messageIds);
-      }
-    }
     return response.data;
   } catch (error: unknown) {
     Logger.error("Failed to place order:", error);

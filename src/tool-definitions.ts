@@ -5,7 +5,6 @@ const IntegerOrStringIntegerZod = z.union([
   z.string().regex(/^[0-9]+(\.[0-9]+)?$/).transform((val) => parseFloat(val))
 ]);
 
-const SecurityTypeZod = z.enum(["STK", "OPT"]);
 const OptionRightZod = z.enum(["C", "P"]);
 
 export const AuthenticateZodShape = {
@@ -39,19 +38,14 @@ export const GetMarketDataZodShape = {
 };
 
 export const PlaceOrderZodShape = {
-  accountId: z.string(),
-  symbol: z.string().optional(),
+  clientOrderId: z.string().trim().min(1),
+  accountId: z.string().trim().min(1),
+  symbol: z.string().trim().min(1).optional(),
   conid: IntegerOrStringIntegerZod.optional(),
-  secType: SecurityTypeZod.optional(),
-  expiry: z.string().optional(),
-  strike: IntegerOrStringIntegerZod.optional(),
-  right: OptionRightZod.optional(),
   action: z.enum(["BUY", "SELL"]),
-  orderType: z.enum(["MKT", "LMT", "STP"]),
-  quantity: IntegerOrStringIntegerZod,
-  price: z.number().optional(),
-  stopPrice: z.number().optional(),
-  suppressConfirmations: z.boolean().optional(),
+  orderType: z.literal("LMT"),
+  quantity: IntegerOrStringIntegerZod.refine(Number.isFinite),
+  price: z.number().finite().positive(),
   exchange: z.string().optional(),
   tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional()
 };
@@ -137,23 +131,8 @@ export const GetMarketDataZodSchema = z.object(GetMarketDataZodShape);
 
 export const PlaceOrderZodSchema = z
   .object(PlaceOrderZodShape)
+  .strict()
   .superRefine((data, ctx) => {
-    if (data.orderType === "LMT" && data.price === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "LMT orders require price",
-        path: ["price"]
-      });
-    }
-
-    if (data.orderType === "STP" && data.stopPrice === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "STP orders require stopPrice",
-        path: ["stopPrice"]
-      });
-    }
-
     if (!data.symbol && data.conid === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -162,36 +141,6 @@ export const PlaceOrderZodSchema = z
       });
     }
 
-    if (data.secType === "OPT" && data.conid === undefined) {
-      if (!data.symbol) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "OPT orders without conid require symbol",
-          path: ["symbol"]
-        });
-      }
-      if (!data.expiry) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "OPT orders without conid require expiry",
-          path: ["expiry"]
-        });
-      }
-      if (data.strike === undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "OPT orders without conid require strike",
-          path: ["strike"]
-        });
-      }
-      if (!data.right) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "OPT orders without conid require right",
-          path: ["right"]
-        });
-      }
-    }
   });
 
 export const GetOrderStatusZodSchema = z.object(GetOrderStatusZodShape);

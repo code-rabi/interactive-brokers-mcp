@@ -20,6 +20,7 @@ export const configSchema = z.object({
 
   // Read-only mode configuration
   IB_READ_ONLY_MODE: z.boolean().optional(),
+  IB_ALLOWED_ACCOUNT_ID: z.string().optional(),
 });
 
 // Global gateway manager instance
@@ -87,6 +88,5 @@ export function createIBMCPServer({ config: userConfig }: { config: z.infer<type
 
   return server;
 }
-
 
 

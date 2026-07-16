@@ -54,14 +54,13 @@ export interface OrderConfirmation {
 
 export interface OrderPayload {
   conid: number;
+  cOID: string;
   orderType: string;
   side: string;
   quantity: number;
   tif: string;
-  secType?: string;
   exchange?: string;
-  price?: number;
-  auxPrice?: number;
+  price: number;
 }
 
 export interface AccountEntry {
@@ -83,14 +82,16 @@ export interface ContractLookupRequest {
   exchange?: string;
 }
 
-export interface OrderRequest extends ContractLookupRequest {
+export interface OrderRequest {
+  clientOrderId: string;
   accountId: string;
+  symbol?: string;
+  conid?: number;
   action: "BUY" | "SELL";
-  orderType: "MKT" | "LMT" | "STP";
+  orderType: "LMT";
   quantity: number;
-  price?: number;
-  stopPrice?: number;
-  suppressConfirmations?: boolean;
+  price: number;
+  exchange?: string;
   tif?: "DAY" | "GTC" | "IOC" | "OPG";
 }
 

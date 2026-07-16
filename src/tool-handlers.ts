@@ -5,6 +5,7 @@ import open from "open";
 import { Logger } from "./logger.js";
 import { FlexQueryClient } from "./flex-query-client.js";
 import { FlexQueryStorage } from "./flex-query-storage.js";
+import { OrderPolicy } from "./order-policy.js";
 import {
   AuthenticateInput,
   GetAccountInfoInput,
@@ -63,10 +64,12 @@ const MAX_FAILED_LOGINS = 5;
 
 export class ToolHandlers {
   private context: ToolHandlerContext;
+  private readonly orderPolicy: OrderPolicy;
   private failedLogins = 0;
 
   constructor(context: ToolHandlerContext) {
     this.context = context;
+    this.orderPolicy = new OrderPolicy(context.config);
     
     // Initialize flex query client and storage if token is provided
     // Only initialize if not already set (useful for testing)
@@ -698,27 +701,23 @@ export class ToolHandlers {
   }
 
   async placeOrder(input: PlaceOrderInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      const order = this.orderPolicy.validatePlaceOrder(input);
+      const auth = await this.ensureAuth();
+      if (!auth.ok) {
+        return auth.result;
+      }
       const result = await this.context.ibClient.placeOrder({
-        accountId: input.accountId,
-        symbol: input.symbol,
-        conid: input.conid,
-        secType: input.secType,
-        expiry: input.expiry,
-        strike: input.strike,
-        right: input.right,
-        action: input.action,
-        orderType: input.orderType,
-        quantity: input.quantity, // Already converted by Zod schema
-        price: input.price,
-        stopPrice: input.stopPrice,
-        suppressConfirmations: input.suppressConfirmations,
-        exchange: input.exchange,
-        tif: input.tif,
+        clientOrderId: order.clientOrderId,
+        accountId: order.accountId,
+        symbol: order.symbol,
+        conid: order.conid,
+        action: order.action,
+        orderType: order.orderType,
+        quantity: order.quantity,
+        price: order.price,
+        exchange: order.exchange,
+        tif: order.tif,
       });
       return {
         content: [
@@ -796,11 +795,12 @@ export class ToolHandlers {
   }
 
   async confirmOrder(input: ConfirmOrderInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      this.orderPolicy.assertWriteEnabled();
+      const auth = await this.ensureAuth();
+      if (!auth.ok) {
+        return auth.result;
+      }
       const result = await this.context.ibClient.confirmOrder(input.replyId, input.messageIds);
       return {
         content: [
@@ -850,11 +850,12 @@ export class ToolHandlers {
   }
 
   async createAlert(input: CreateAlertInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      this.orderPolicy.assertAllowedAccount(input.accountId);
+      const auth = await this.ensureAuth();
+      if (!auth.ok) {
+        return auth.result;
+      }
       const result = await this.context.ibClient.createAlert(input.accountId, input.alertRequest);
       return {
         content: [
@@ -877,11 +878,12 @@ export class ToolHandlers {
   }
 
   async activateAlert(input: ActivateAlertInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      this.orderPolicy.assertAllowedAccount(input.accountId);
+      const auth = await this.ensureAuth();
+      if (!auth.ok) {
+        return auth.result;
+      }
       const result = await this.context.ibClient.activateAlert(input.accountId, input.alertId);
       return {
         content: [
@@ -904,11 +906,12 @@ export class ToolHandlers {
   }
 
   async deleteAlert(input: DeleteAlertInput): Promise<ToolHandlerResult> {
-    const auth = await this.ensureAuth();
-    if (!auth.ok) {
-      return auth.result;
-    }
     try {
+      this.orderPolicy.assertAllowedAccount(input.accountId);
+      const auth = await this.ensureAuth();
+      if (!auth.ok) {
+        return auth.result;
+      }
       const result = await this.context.ibClient.deleteAlert(input.accountId, input.alertId);
       return {
         content: [

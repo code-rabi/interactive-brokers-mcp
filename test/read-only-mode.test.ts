@@ -1,76 +1,66 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { registerTools } from '../src/tools.js';
-import { IBClient } from '../src/ib-client.js';
-import { IBGatewayManager } from '../src/gateway-manager.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTools } from "../src/tools.js";
+import { IBClient } from "../src/ib-client.js";
+import { IBGatewayManager } from "../src/gateway-manager.js";
 
-// Mock dependencies
-vi.mock('../src/ib-client.js');
-vi.mock('../src/gateway-manager.js');
+vi.mock("../src/ib-client.js");
+vi.mock("../src/gateway-manager.js");
 
-describe('Read-Only Mode Tool Registration', () => {
-    let mockMcpServer: McpServer;
-    let mockIBClient: IBClient;
-    let mockGatewayManager: IBGatewayManager;
-    let registeredTools: string[] = [];
+const WRITE_TOOLS = [
+  "place_order",
+  "confirm_order",
+  "create_alert",
+  "activate_alert",
+  "delete_alert",
+];
 
-    beforeEach(() => {
-        registeredTools = [];
-        mockMcpServer = {
-            tool: vi.fn().mockImplementation((name, ...args) => {
-                registeredTools.push(name);
-                return mockMcpServer;
-            }),
-        } as unknown as McpServer;
+describe("read-only safety defaults", () => {
+  let mockMcpServer: McpServer;
+  let mockIBClient: IBClient;
+  let mockGatewayManager: IBGatewayManager;
+  let registeredTools: string[];
 
-        mockIBClient = {} as IBClient;
-        mockGatewayManager = {} as IBGatewayManager;
+  beforeEach(() => {
+    registeredTools = [];
+    mockMcpServer = {
+      tool: vi.fn().mockImplementation((name) => {
+        registeredTools.push(name);
+        return mockMcpServer;
+      }),
+    } as unknown as McpServer;
+    mockIBClient = {} as IBClient;
+    mockGatewayManager = {} as IBGatewayManager;
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("defaults omitted IB_READ_ONLY_MODE to true", async () => {
+    vi.stubEnv("IB_READ_ONLY_MODE", "");
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.IB_READ_ONLY_MODE).toBe(true);
+  });
+
+  it("does not register write tools when read-only mode is omitted", () => {
+    registerTools(mockMcpServer, mockIBClient, mockGatewayManager);
+    expect(registeredTools).toEqual(expect.arrayContaining([
+      "get_positions", "get_market_data", "get_account_info", "get_live_orders",
+    ]));
+    for (const tool of WRITE_TOOLS) expect(registeredTools).not.toContain(tool);
+  });
+
+  it("refuses live write registration without an allowed account", () => {
+    expect(() => registerTools(mockMcpServer, mockIBClient, mockGatewayManager, {
+      IB_READ_ONLY_MODE: false,
+    })).toThrow(/IB_ALLOWED_ACCOUNT_ID/);
+  });
+
+  it("registers write tools only with explicit false and an allowed account", () => {
+    registerTools(mockMcpServer, mockIBClient, mockGatewayManager, {
+      IB_READ_ONLY_MODE: false,
+      IB_ALLOWED_ACCOUNT_ID: "U12345",
     });
-
-    it('should register ALL tools when read-only mode is DISABLED (default)', () => {
-        const config = {}; // No IB_READ_ONLY_MODE
-        registerTools(mockMcpServer, mockIBClient, mockGatewayManager, config);
-
-        // Verify write tools are registered
-        expect(registeredTools).toContain('place_order');
-        expect(registeredTools).toContain('confirm_order');
-        expect(registeredTools).toContain('create_alert');
-        expect(registeredTools).toContain('activate_alert');
-        expect(registeredTools).toContain('delete_alert');
-
-        // Verify read tools are also registered
-        expect(registeredTools).toContain('get_positions');
-        expect(registeredTools).toContain('get_market_data');
-    });
-
-    it('should register ALL tools when read-only mode is EXPLICITLY FALSE', () => {
-        const config = { IB_READ_ONLY_MODE: false };
-        registerTools(mockMcpServer, mockIBClient, mockGatewayManager, config);
-
-        expect(registeredTools).toContain('place_order');
-        expect(registeredTools).toContain('confirm_order');
-        expect(registeredTools).toContain('create_alert');
-        expect(registeredTools).toContain('activate_alert');
-        expect(registeredTools).toContain('delete_alert');
-    });
-
-    it('should NOT register modification tools when read-only mode is ENABLED', () => {
-        const config = { IB_READ_ONLY_MODE: true };
-        registerTools(mockMcpServer, mockIBClient, mockGatewayManager, config);
-
-        // Verify write tools are NOT registered
-        expect(registeredTools).not.toContain('place_order');
-        expect(registeredTools).not.toContain('confirm_order');
-        expect(registeredTools).not.toContain('create_alert');
-        expect(registeredTools).not.toContain('activate_alert');
-        expect(registeredTools).not.toContain('delete_alert');
-
-        // Verify read tools ARE registered
-        expect(registeredTools).toContain('get_positions');
-        expect(registeredTools).toContain('get_market_data');
-        expect(registeredTools).toContain('get_account_info');
-        expect(registeredTools).toContain('get_live_orders');
-        expect(registeredTools).toContain('get_order_status');
-        expect(registeredTools).toContain('get_alerts');
-    });
+    for (const tool of WRITE_TOOLS) expect(registeredTools).toContain(tool);
+  });
 });

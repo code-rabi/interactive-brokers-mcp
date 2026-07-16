@@ -14,7 +14,52 @@ import {
 
 describe('Tool Definitions - Zod Schemas', () => {
   describe('PlaceOrderZodSchema', () => {
-    it('should accept valid market order', () => {
+    const validLimitOrder = {
+      clientOrderId: 'codex-20260716-001',
+      accountId: 'U12345',
+      symbol: 'AAPL',
+      action: 'BUY' as const,
+      orderType: 'LMT' as const,
+      quantity: 10,
+      price: 150.50,
+    };
+
+    it('should accept a valid limit stock order by symbol or conid', () => {
+      expect(PlaceOrderZodSchema.safeParse(validLimitOrder).success).toBe(true);
+      expect(PlaceOrderZodSchema.safeParse({
+        ...validLimitOrder,
+        symbol: undefined,
+        conid: 265598,
+      }).success).toBe(true);
+    });
+
+    it.each([
+      ['MKT', { orderType: 'MKT' }],
+      ['STP', { orderType: 'STP', stopPrice: 140 }],
+      ['option secType', { secType: 'OPT' }],
+      ['option expiry', { expiry: 'JAN27' }],
+      ['option strike', { strike: 200 }],
+      ['option right', { right: 'C' }],
+      ['suppress confirmations', { suppressConfirmations: true }],
+    ])('should reject unsafe order input %s', (_label, override) => {
+      expect(PlaceOrderZodSchema.safeParse({ ...validLimitOrder, ...override }).success).toBe(false);
+    });
+
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject invalid price %s',
+      (price) => expect(PlaceOrderZodSchema.safeParse({ ...validLimitOrder, price }).success).toBe(false),
+    );
+
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject invalid quantity %s',
+      (quantity) => expect(PlaceOrderZodSchema.safeParse({ ...validLimitOrder, quantity }).success).toBe(false),
+    );
+
+    it('should reject a blank client order ID', () => {
+      expect(PlaceOrderZodSchema.safeParse({ ...validLimitOrder, clientOrderId: '   ' }).success).toBe(false);
+    });
+
+    it('should reject a market order', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -24,10 +69,10 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
       
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
     });
 
-    it('should accept fractional quantities as numbers', () => {
+    it('should reject a market order with fractional numeric quantity', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -37,13 +82,13 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
       
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       if (result.success) {
         expect(result.data.quantity).toBe(1.5);
       }
     });
 
-    it('should accept fractional quantities as strings', () => {
+    it('should reject a market order with fractional string quantity', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -53,13 +98,13 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
       
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       if (result.success) {
         expect(result.data.quantity).toBe(2.75);
       }
     });
 
-    it('should accept integer quantities as strings', () => {
+    it('should reject a market order with integer string quantity', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -69,7 +114,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
       
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       if (result.success) {
         expect(result.data.quantity).toBe(100);
       }
@@ -116,6 +161,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept valid LMT order with price', () => {
       const validOrder = {
+        clientOrderId: 'codex-20260716-002',
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -141,7 +187,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       expect(result.success).toBe(false);
     });
 
-    it('should accept valid STP order with stopPrice', () => {
+    it('should reject an STP order with stopPrice', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -152,10 +198,10 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
       
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
     });
 
-    it('should accept suppressConfirmations flag', () => {
+    it('should reject suppressConfirmations', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -166,11 +212,11 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
 
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
     });
 
     it.each(['DAY', 'GTC', 'IOC', 'OPG'] as const)(
-      'should accept tif value %s',
+      'should reject MKT orders even with tif value %s',
       (tif) => {
         const validOrder = {
           accountId: 'U12345',
@@ -182,7 +228,7 @@ describe('Tool Definitions - Zod Schemas', () => {
         };
 
         const result = PlaceOrderZodSchema.safeParse(validOrder);
-        expect(result.success).toBe(true);
+        expect(result.success).toBe(false);
       }
     );
 
@@ -200,7 +246,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       expect(result.success).toBe(false);
     });
 
-    it('should accept exchange when provided alongside required fields', () => {
+    it('should reject MKT orders even with exchange', () => {
       const validOrder = {
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -211,7 +257,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       };
 
       const result = PlaceOrderZodSchema.safeParse(validOrder);
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
     });
   });
 
@@ -425,7 +471,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       }
     });
 
-    it('should accept option orders with contract details', () => {
+    it('should reject option orders with contract details', () => {
       const result = PlaceOrderZodSchema.safeParse({
         accountId: 'U12345',
         symbol: 'AAPL',
@@ -439,7 +485,7 @@ describe('Tool Definitions - Zod Schemas', () => {
         price: 4.5,
       });
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
     });
 
     it('should reject option orders missing expiry when conid is not provided', () => {

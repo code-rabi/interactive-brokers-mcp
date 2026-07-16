@@ -322,17 +322,19 @@ describe('IBClient', () => {
     });
 
     describe('placeOrder', () => {
-      it('should place market order successfully', async () => {
+      it('should place limit order successfully', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123', status: 'Submitted' }]));
 
         const orderRequest = {
+          clientOrderId: 'codex-20260716-basic',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY' as const,
-          orderType: 'MKT' as const,
+          orderType: 'LMT' as const,
           quantity: 10,
+          price: 150.50,
         };
 
         const result = await client.placeOrder(orderRequest);
@@ -340,7 +342,7 @@ describe('IBClient', () => {
         const body = findCallBody('/iserver/account/U12345/orders');
         expect(body.orders[0]).toEqual(expect.objectContaining({
           conid: 265598,
-          orderType: 'MKT',
+          orderType: 'LMT',
           side: 'BUY',
           quantity: 10,
         }));
@@ -353,6 +355,7 @@ describe('IBClient', () => {
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
+          clientOrderId: 'codex-20260716-price',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY' as const,
@@ -373,11 +376,13 @@ describe('IBClient', () => {
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
+          clientOrderId: 'codex-20260716-day',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY',
-          orderType: 'MKT',
+          orderType: 'LMT',
           quantity: 10,
+          price: 150.50,
         });
 
         const body = findCallBody('/iserver/account/U12345/orders');
@@ -390,11 +395,13 @@ describe('IBClient', () => {
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
+          clientOrderId: 'codex-20260716-gtc',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY',
-          orderType: 'MKT',
+          orderType: 'LMT',
           quantity: 10,
+          price: 150.50,
           tif: 'GTC',
         });
 
@@ -408,11 +415,13 @@ describe('IBClient', () => {
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
+          clientOrderId: 'codex-20260716-search-exchange',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY',
-          orderType: 'MKT',
+          orderType: 'LMT',
           quantity: 10,
+          price: 150.50,
           exchange: 'NASDAQ',
         });
 
@@ -428,11 +437,13 @@ describe('IBClient', () => {
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
+          clientOrderId: 'codex-20260716-payload-exchange',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY',
-          orderType: 'MKT',
+          orderType: 'LMT',
           quantity: 10,
+          price: 150.50,
           exchange: 'NASDAQ',
         });
 
@@ -445,32 +456,35 @@ describe('IBClient', () => {
 
         await expect(
           client.placeOrder({
+            clientOrderId: 'codex-20260716-invalid-symbol',
             accountId: 'U12345',
             symbol: 'INVALID',
             action: 'BUY',
-            orderType: 'MKT',
+            orderType: 'LMT',
             quantity: 10,
+            price: 150.50,
           })
         ).rejects.toThrow('Symbol INVALID not found');
       });
 
-      it('should include stopPrice for stop orders', async () => {
+      it('should include the client order ID for limit orders', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
+          clientOrderId: 'codex-20260716-001',
           accountId: 'U12345',
           symbol: 'AAPL',
-          action: 'SELL' as const,
-          orderType: 'STP' as const,
+          action: 'BUY' as const,
+          orderType: 'LMT' as const,
           quantity: 10,
-          stopPrice: 140.00,
+          price: 150.50,
         });
 
         const body = findCallBody('/iserver/account/U12345/orders');
         expect(body.orders[0]).toEqual(expect.objectContaining({
-          auxPrice: 140.00,
+          cOID: 'codex-20260716-001',
         }));
       });
     });
@@ -848,59 +862,4 @@ describe('Option contract support', () => {
     );
   });
 
-  it('should place option orders after resolving the option contract', async () => {
-    mockFetch
-      .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
-      .mockResolvedValueOnce(mockResponse([{ conid: 912345678, symbol: 'AAPL', secType: 'OPT' }]))
-      .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
-
-    await optionClient.placeOrder({
-      accountId: 'U12345',
-      symbol: 'AAPL',
-      secType: 'OPT',
-      expiry: 'JAN27',
-      strike: 200,
-      right: 'C',
-      action: 'BUY',
-      orderType: 'LMT',
-      quantity: 2,
-      price: 4.5,
-    });
-
-    const body = findCallBody('/iserver/account/U12345/orders');
-    expect(body.orders[0]).toEqual(
-      expect.objectContaining({
-        conid: 912345678,
-        secType: 'OPT',
-        side: 'BUY',
-        orderType: 'LMT',
-        quantity: 2,
-        price: 4.5,
-      }),
-    );
-  });
-
-  it('should place option orders with a pre-resolved conid', async () => {
-    mockFetch.mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
-
-    await optionClient.placeOrder({
-      accountId: 'U12345',
-      conid: 912345678,
-      secType: 'OPT',
-      action: 'SELL',
-      orderType: 'MKT',
-      quantity: 1,
-    });
-
-    const body = findCallBody('/iserver/account/U12345/orders');
-    expect(body.orders[0]).toEqual(
-      expect.objectContaining({
-        conid: 912345678,
-        secType: 'OPT',
-        side: 'SELL',
-        orderType: 'MKT',
-        quantity: 1,
-      }),
-    );
-  });
 });

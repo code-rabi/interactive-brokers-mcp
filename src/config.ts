@@ -3,6 +3,10 @@ import { config as dotenvConfig } from "dotenv";
 // Load environment variables
 dotenvConfig();
 
+export function parseReadOnlyMode(value: unknown): boolean {
+  return value !== false && value !== "false";
+}
+
 export const config = {
   IB_GATEWAY_HOST: process.env.IB_GATEWAY_HOST || "localhost",
   IB_GATEWAY_PORT: parseInt(process.env.IB_GATEWAY_PORT || "5000"),
@@ -22,7 +26,8 @@ export const config = {
   IB_PAPER_TRADING: process.env.IB_PAPER_TRADING === "true",
 
   // Read-only mode configuration
-  IB_READ_ONLY_MODE: process.env.IB_READ_ONLY_MODE === "true",
+  IB_READ_ONLY_MODE: parseReadOnlyMode(process.env.IB_READ_ONLY_MODE),
+  IB_ALLOWED_ACCOUNT_ID: process.env.IB_ALLOWED_ACCOUNT_ID?.trim() || undefined,
 
   // 2FA TOTP configuration
   IB_TWO_FA_STRATEGY: process.env.IB_TWO_FA_STRATEGY || "manual",

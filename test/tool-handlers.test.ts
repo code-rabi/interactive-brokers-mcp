@@ -63,6 +63,8 @@ describe('ToolHandlers', () => {
         IB_GATEWAY_HOST: 'localhost',
         IB_GATEWAY_PORT: 5000,
         IB_AUTH_TIMEOUT: 10, // Use a short timeout for testing
+        IB_READ_ONLY_MODE: false,
+        IB_ALLOWED_ACCOUNT_ID: 'U12345',
       },
     };
 
@@ -138,90 +140,54 @@ describe('ToolHandlers', () => {
   });
 
   describe('placeOrder', () => {
-    it('should place market order', async () => {
+    const validOrder = {
+      clientOrderId: 'codex-20260716-001',
+      accountId: 'U12345',
+      symbol: 'AAPL',
+      action: 'BUY' as const,
+      orderType: 'LMT' as const,
+      quantity: 10,
+      price: 150.50,
+    };
+
+    it('should map an allowed limit stock order', async () => {
       const mockResponse = { orderId: '123', status: 'Submitted' };
       mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
 
-      const orderInput = {
-        accountId: 'U12345',
-        symbol: 'AAPL',
-        action: 'BUY' as const,
-        orderType: 'MKT' as const,
-        quantity: 10,
-      };
-
-      const result = await handlers.placeOrder(orderInput);
+      const result = await handlers.placeOrder(validOrder);
 
       expect(result.content).toBeDefined();
       expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
         expect.objectContaining({
+          clientOrderId: 'codex-20260716-001',
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY',
-          orderType: 'MKT',
+          orderType: 'LMT',
           quantity: 10,
-        })
-      );
-    });
-
-    it('should place limit order with price', async () => {
-      const mockResponse = { orderId: '123', status: 'Submitted' };
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
-
-      const orderInput = {
-        accountId: 'U12345',
-        symbol: 'AAPL',
-        action: 'BUY' as const,
-        orderType: 'LMT' as const,
-        quantity: 10,
-        price: 150.50,
-      };
-
-      await handlers.placeOrder(orderInput);
-
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
-        expect.objectContaining({
           price: 150.50,
         })
       );
     });
 
-    it('should forward exchange and tif to ibClient.placeOrder when provided', async () => {
-      const mockResponse = { orderId: '123', status: 'Submitted' };
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
+    it('should reject account mismatch before calling the IB client', async () => {
+      const result = await handlers.placeOrder({ ...validOrder, accountId: 'U99999' });
 
-      const orderInput = {
-        accountId: 'U12345',
-        symbol: 'AAPL',
-        action: 'BUY' as const,
-        orderType: 'MKT' as const,
-        quantity: 10,
-        exchange: 'NASDAQ',
-        tif: 'GTC' as const,
-      };
+      expect(result.content[0].text).toContain('U12345');
+      expect(mockIBClient.placeOrder).not.toHaveBeenCalled();
+    });
 
-      await handlers.placeOrder(orderInput);
+    it('should reject unsafe direct calls that bypass schema validation', async () => {
+      const result = await handlers.placeOrder({ ...validOrder, orderType: 'MKT' } as any);
 
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
-        expect.objectContaining({
-          exchange: 'NASDAQ',
-          tif: 'GTC',
-        })
-      );
+      expect(result.content[0].text).toMatch(/LMT|limit/i);
+      expect(mockIBClient.placeOrder).not.toHaveBeenCalled();
     });
 
     it('should handle order placement errors', async () => {
       mockIBClient.placeOrder = vi.fn().mockRejectedValue(new Error('Order failed'));
 
-      const orderInput = {
-        accountId: 'U12345',
-        symbol: 'AAPL',
-        action: 'BUY' as const,
-        orderType: 'MKT' as const,
-        quantity: 10,
-      };
-
-      const result = await handlers.placeOrder(orderInput);
+      const result = await handlers.placeOrder(validOrder);
 
       expect(result.content[0].text).toContain('Order failed');
     });
@@ -637,10 +603,11 @@ describe('ToolHandlers', () => {
       expect(result.content[0].text).toContain('"conid": 912345678');
     });
 
-    it('should pass option order fields through to the IB client', async () => {
+    it('should reject option order fields before calling the IB client', async () => {
       mockIBClient.placeOrder = vi.fn().mockResolvedValue({ orderId: '123', status: 'Submitted' });
 
-      await handlers.placeOrder({
+      const result = await handlers.placeOrder({
+        clientOrderId: 'codex-20260716-option',
         accountId: 'U12345',
         symbol: 'AAPL',
         secType: 'OPT',
@@ -651,18 +618,10 @@ describe('ToolHandlers', () => {
         orderType: 'LMT',
         quantity: 1,
         price: 4.5,
-      });
+      } as any);
 
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
-        expect.objectContaining({
-          symbol: 'AAPL',
-          secType: 'OPT',
-          expiry: 'JAN27',
-          strike: 200,
-          right: 'C',
-          price: 4.5,
-        }),
-      );
+      expect(result.content[0].text).toMatch(/option|secType|unsupported/i);
+      expect(mockIBClient.placeOrder).not.toHaveBeenCalled();
     });
   });
 });

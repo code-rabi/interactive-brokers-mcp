@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { IBClient } from "./ib-client.js";
 import { IBGatewayManager } from "./gateway-manager.js";
-import { config } from "./config.js";
+import { config, parseReadOnlyMode } from "./config.js";
 import { registerTools } from "./tools.js";
 import { Logger } from "./logger.js";
 
@@ -74,16 +74,22 @@ function parseArgs(): z.infer<typeof configSchema> {
             args.IB_PAPER_TRADING = true;
             Logger.debug(`🔍 Set IB_PAPER_TRADING to: true (flag only)`);
           }
+          break;
         case 'ib-read-only-mode':
           // Support both --ib-read-only-mode (boolean flag) and --ib-read-only-mode=true/false
           if (nextArg && !nextArg.startsWith('--')) {
-            args.IB_READ_ONLY_MODE = nextArg.toLowerCase() === 'true';
-            Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: ${nextArg.toLowerCase() === 'true'} (from arg: ${nextArg})`);
+            args.IB_READ_ONLY_MODE = parseReadOnlyMode(nextArg);
+            Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: ${args.IB_READ_ONLY_MODE} (from arg: ${nextArg})`);
             i++;
           } else {
             args.IB_READ_ONLY_MODE = true;
             Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: true (flag only)`);
           }
+          break;
+        case 'ib-allowed-account-id':
+          args.IB_ALLOWED_ACCOUNT_ID = nextArg;
+          Logger.debug(`🔍 Set IB_ALLOWED_ACCOUNT_ID to: ${nextArg}`);
+          i++;
           break;
 
       }
@@ -125,8 +131,12 @@ function parseArgs(): z.infer<typeof configSchema> {
           Logger.debug(`🔍 Set IB_PAPER_TRADING to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
           break;
         case 'ib-read-only-mode':
-          args.IB_READ_ONLY_MODE = value.toLowerCase() === 'true';
-          Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
+          args.IB_READ_ONLY_MODE = parseReadOnlyMode(value);
+          Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: ${args.IB_READ_ONLY_MODE} (from value: ${value})`);
+          break;
+        case 'ib-allowed-account-id':
+          args.IB_ALLOWED_ACCOUNT_ID = value;
+          Logger.debug(`🔍 Set IB_ALLOWED_ACCOUNT_ID to: ${value}`);
           break;
 
       }
@@ -152,6 +162,7 @@ export const configSchema = z.object({
 
   // Read-only mode configuration
   IB_READ_ONLY_MODE: z.boolean().optional(),
+  IB_ALLOWED_ACCOUNT_ID: z.string().optional(),
 });
 
 // Global gateway manager instance
@@ -312,7 +323,8 @@ if (isMainModule) {
     IB_AUTH_WAIT_SECONDS: process.env.IB_AUTH_WAIT_SECONDS ? parseInt(process.env.IB_AUTH_WAIT_SECONDS) : undefined,
     IB_AUTH_POLL_SECONDS: process.env.IB_AUTH_POLL_SECONDS ? parseInt(process.env.IB_AUTH_POLL_SECONDS) : undefined,
     IB_HEADLESS_MODE: process.env.IB_HEADLESS_MODE === 'true',
-    IB_READ_ONLY_MODE: process.env.IB_READ_ONLY_MODE === 'true',
+    IB_READ_ONLY_MODE: parseReadOnlyMode(process.env.IB_READ_ONLY_MODE),
+    IB_ALLOWED_ACCOUNT_ID: process.env.IB_ALLOWED_ACCOUNT_ID,
 
   };
 

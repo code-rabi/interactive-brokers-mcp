@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { IBClient } from "./ib-client.js";
 import { IBGatewayManager } from "./gateway-manager.js";
 import { ToolHandlers, type ToolHandlerContext } from "./tool-handlers.js";
+import { OrderPolicy } from "./order-policy.js";
 import {
   ActivateAlertZodShape,
   AuthenticateZodShape,
@@ -28,10 +29,14 @@ export function registerTools(
   gatewayManager?: IBGatewayManager,
   userConfig?: any,
 ) {
+  const orderPolicy = new OrderPolicy(userConfig ?? {});
+  if (!orderPolicy.readOnly) orderPolicy.assertWriteEnabled();
+  const writeEnabled = !orderPolicy.readOnly;
+
   const context: ToolHandlerContext = {
     ibClient,
     gatewayManager,
-    config: userConfig,
+    config: userConfig ?? {},
   };
 
   const handlers = new ToolHandlers(context);
@@ -87,16 +92,10 @@ export function registerTools(
     async (args) => await handlers.getMarketData(args),
   );
 
-  if (!userConfig?.IB_READ_ONLY_MODE) {
+  if (writeEnabled) {
     registerTool(
       "place_order",
-      "Place a trading order. Examples:\n" +
-        "- Market buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
-        "- Limit sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`\n" +
-        "- Stop sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"STP\",\"quantity\":1,\"stopPrice\":180 }`\n" +
-        "- Option buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"secType\":\"OPT\",\"expiry\":\"JAN27\",\"strike\":200,\"right\":\"C\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":4.5 }`\n" +
-        "- Option by conid: `{ \"accountId\":\"abc\",\"conid\":123456789,\"secType\":\"OPT\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
-        "- Suppress confirmations: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1,\"suppressConfirmations\":true }`",
+      "Place a limit stock order. Usage: `{ \"clientOrderId\":\"unique-id\",\"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`.",
       PlaceOrderZodShape,
       async (args) => await handlers.placeOrder(args),
     );
@@ -117,7 +116,7 @@ export function registerTools(
     async (args) => await handlers.getLiveOrders(args),
   );
 
-  if (!userConfig?.IB_READ_ONLY_MODE) {
+  if (writeEnabled) {
     registerTool(
       "confirm_order",
       "Manually confirm an order that requires confirmation. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\", \"messageIds\": [\"o10151\", \"o10153\"] }`.",
@@ -133,7 +132,7 @@ export function registerTools(
     async (args) => await handlers.getAlerts(args),
   );
 
-  if (!userConfig?.IB_READ_ONLY_MODE) {
+  if (writeEnabled) {
     registerTool(
       "create_alert",
       "Create a new trading alert. Usage: `{ \"accountId\": \"<id>\", \"alertRequest\": { \"alertName\": \"Price Alert\", \"conditions\": [{ \"conidex\": \"265598\", \"type\": \"price\", \"operator\": \">\", \"triggerMethod\": \"last\", \"value\": \"150\" }] } }`.",
@@ -142,7 +141,7 @@ export function registerTools(
     );
   }
 
-  if (!userConfig?.IB_READ_ONLY_MODE) {
+  if (writeEnabled) {
     registerTool(
       "activate_alert",
       "Activate a previously created alert. Usage: `{ \"accountId\": \"<id>\", \"alertId\": \"<alertId>\" }`.",
@@ -151,7 +150,7 @@ export function registerTools(
     );
   }
 
-  if (!userConfig?.IB_READ_ONLY_MODE) {
+  if (writeEnabled) {
     registerTool(
       "delete_alert",
       "Delete an alert. Usage: `{ \"accountId\": \"<id>\", \"alertId\": \"<alertId>\" }`.",
