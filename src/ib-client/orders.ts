@@ -1,4 +1,5 @@
 import { Logger } from "../logger.js";
+import { HttpError } from "../http.js";
 import type { IBClientRequester } from "./accounts.js";
 import {
   type ContractSearch,
@@ -10,6 +11,29 @@ import {
   InvalidOrderContractError,
   isAuthenticationError,
 } from "./types.js";
+
+export class OrderSubmissionError extends Error {
+  readonly status?: number;
+  readonly ibkrBody?: unknown;
+  readonly transportCode?: string;
+  readonly submissionUncertain: boolean;
+
+  constructor(options: {
+    message: string;
+    status?: number;
+    ibkrBody?: unknown;
+    transportCode?: string;
+    submissionUncertain: boolean;
+    cause?: unknown;
+  }) {
+    super(options.message, { cause: options.cause });
+    this.name = "OrderSubmissionError";
+    this.status = options.status;
+    this.ibkrBody = options.ibkrBody;
+    this.transportCode = options.transportCode;
+    this.submissionUncertain = options.submissionUncertain;
+  }
+}
 
 async function fetchAuthoritativeContract(
   client: IBClientRequester,
@@ -32,12 +56,54 @@ async function resolveAuthoritativeStock(
   if (contract.secType !== "STK") {
     throw new InvalidOrderContractError(`Contract ${conid} is not an authoritative STK stock contract`);
   }
+  if (contract.currency !== "USD") {
+    throw new InvalidOrderContractError(`Contract ${conid} is not an authoritative USD stock contract`);
+  }
   if (expectedSymbol && contract.symbol.toUpperCase() !== expectedSymbol.toUpperCase()) {
     throw new InvalidOrderContractError(
       `Contract ${conid} symbol ${contract.symbol} does not match requested stock ${expectedSymbol}`,
     );
   }
   return contract;
+}
+
+function transportCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const candidate = error as { code?: unknown; cause?: { code?: unknown }; name?: unknown };
+  const code = candidate.code ?? candidate.cause?.code;
+  if (typeof code === "string") return code;
+  return typeof candidate.name === "string" ? candidate.name : undefined;
+}
+
+async function submitOrder(
+  client: IBClientRequester,
+  accountId: string,
+  order: OrderPayload,
+): Promise<unknown> {
+  try {
+    const response = await client.request<OrderConfirmation[]>(
+      "POST",
+      `/iserver/account/${accountId}/orders`,
+      { body: { orders: [order] } },
+    );
+    return response.data;
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw new OrderSubmissionError({
+        message: `IBKR rejected order submission with HTTP status ${error.response.status}`,
+        status: error.response.status,
+        ibkrBody: error.response.data,
+        submissionUncertain: false,
+        cause: error,
+      });
+    }
+    throw new OrderSubmissionError({
+      message: "Order submission outcome is uncertain because the transport failed before a response was received",
+      transportCode: transportCode(error),
+      submissionUncertain: true,
+      cause: error,
+    });
+  }
 }
 
 function normalizeAccountId(account: unknown): string | undefined {
@@ -106,13 +172,7 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
       };
 
       if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-      const response = await client.request<OrderConfirmation[]>(
-        "POST",
-        `/iserver/account/${orderRequest.accountId}/orders`,
-        { body: { orders: [order] } },
-      );
-
-      return response.data;
+      return submitOrder(client, orderRequest.accountId, order);
     }
 
     if (!orderRequest.symbol) {
@@ -133,10 +193,11 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
     );
     const stockCandidates = authoritativeCandidates.filter(
       (candidate) => candidate.secType === "STK"
+        && candidate.currency === "USD"
         && candidate.symbol.toUpperCase() === orderRequest.symbol!.toUpperCase(),
     );
     if (stockCandidates.length !== 1) {
-      const reason = stockCandidates.length === 0 ? "no STK stock contract" : "ambiguous STK stock contracts";
+      const reason = stockCandidates.length === 0 ? "no eligible USD STK stock contract" : "ambiguous eligible USD STK stock contracts";
       throw new InvalidOrderContractError(`Symbol ${orderRequest.symbol} resolved to ${reason}`);
     }
 
@@ -151,12 +212,7 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
       tif: orderRequest.tif || "DAY",
     };
     if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-    const response = await client.request<OrderConfirmation[]>("POST",
-      `/iserver/account/${orderRequest.accountId}/orders`,
-      { body: { orders: [order] } },
-    );
-
-    return response.data;
+    return submitOrder(client, orderRequest.accountId, order);
   } catch (error: unknown) {
     Logger.error("Failed to place order:", error);
     if (isAuthenticationError(error)) {
@@ -164,6 +220,7 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
     }
     if (error instanceof SymbolNotFoundError) throw error;
     if (error instanceof InvalidOrderContractError) throw error;
+    if (error instanceof OrderSubmissionError) throw error;
     throw new Error("Failed to place order");
   }
 }

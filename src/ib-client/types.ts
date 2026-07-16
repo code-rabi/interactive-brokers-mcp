@@ -25,6 +25,7 @@ export interface ContractSearch {
   secType?: string;
   description?: string;
   companyHeader?: string;
+  currency?: string;
   sections?: ContractSection[];
 }
 

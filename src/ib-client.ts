@@ -14,7 +14,7 @@ import {
 import { getAccountInfo, getPositions } from "./ib-client/accounts.js";
 import { getMarketData } from "./ib-client/market-data.js";
 import { getOptionChain, resolveOptionConid } from "./ib-client/options.js";
-import { placeOrder, confirmOrder, getOrderStatus, getOrders } from "./ib-client/orders.js";
+import { placeOrder, confirmOrder, getOrderStatus, getOrders, OrderSubmissionError } from "./ib-client/orders.js";
 import { getAlerts, createAlert, activateAlert, deleteAlert } from "./ib-client/alerts.js";
 import {
   type AuthStatusResponse,
@@ -30,7 +30,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-export { SymbolNotFoundError, InvalidOrderContractError };
+export { SymbolNotFoundError, InvalidOrderContractError, OrderSubmissionError };
 
 // ---------------------------------------------------------------------------
 // Client

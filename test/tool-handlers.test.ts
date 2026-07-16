@@ -4,6 +4,10 @@ import { ToolHandlers, ToolHandlerContext } from '../src/tool-handlers.js';
 import { IBClient } from '../src/ib-client.js';
 import { IBGatewayManager } from '../src/gateway-manager.js';
 import { HeadlessAuthenticator } from '../src/headless-auth.js';
+import { OrderIdempotencyStore } from '../src/order-idempotency-store.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import open from 'open';
 
 // Mock dependencies
@@ -17,9 +21,11 @@ describe('ToolHandlers', () => {
   let mockIBClient: IBClient;
   let mockGatewayManager: IBGatewayManager;
   let context: ToolHandlerContext;
+  let orderStoreDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    orderStoreDir = await mkdtemp(path.join(tmpdir(), 'ib-mcp-handler-orders-'));
   vi.mocked(HeadlessAuthenticator).mockImplementation(function MockHeadlessAuthenticator() {
     return {
       authenticate: vi.fn().mockResolvedValue({ success: true }),
@@ -66,13 +72,15 @@ describe('ToolHandlers', () => {
         IB_READ_ONLY_MODE: false,
         IB_ALLOWED_ACCOUNT_ID: 'U12345',
       },
+      orderIdempotencyStore: new OrderIdempotencyStore(path.join(orderStoreDir, 'orders.json')),
     };
 
     handlers = new ToolHandlers(context);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
+    await rm(orderStoreDir, { recursive: true, force: true });
   });
 
 
@@ -190,6 +198,47 @@ describe('ToolHandlers', () => {
       const result = await handlers.placeOrder(validOrder);
 
       expect(result.content[0].text).toContain('Order failed');
+    });
+
+    it('should replay a completed result after handler restart without submitting again', async () => {
+      const response = [{ id: 'order-123', status: 'Submitted' }];
+      mockIBClient.placeOrder = vi.fn().mockResolvedValue(response);
+      const first = await handlers.placeOrder(validOrder);
+
+      const restarted = new ToolHandlers({
+        ...context,
+        orderIdempotencyStore: new OrderIdempotencyStore(path.join(orderStoreDir, 'orders.json')),
+      });
+      const replay = await restarted.placeOrder({ ...validOrder });
+
+      expect(JSON.parse(first.content[0].text)).toEqual(response);
+      expect(JSON.parse(replay.content[0].text)).toEqual(response);
+      expect(mockIBClient.placeOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('should persist transport timeouts as SUBMISSION_UNCERTAIN and never auto-retry', async () => {
+      const transportError = Object.assign(new Error('request timed out'), {
+        name: 'OrderSubmissionError',
+        transportCode: 'UND_ERR_CONNECT_TIMEOUT',
+        submissionUncertain: true,
+      });
+      mockIBClient.placeOrder = vi.fn().mockRejectedValue(transportError);
+
+      const first = await handlers.placeOrder(validOrder);
+      const second = await handlers.placeOrder({ ...validOrder });
+      const firstPayload = JSON.parse(first.content[0].text);
+      const secondPayload = JSON.parse(second.content[0].text);
+
+      expect(firstPayload).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        submissionUncertain: true,
+        transportCode: 'UND_ERR_CONNECT_TIMEOUT',
+      });
+      expect(secondPayload).toMatchObject({
+        state: 'uncertain',
+        error: { submissionUncertain: true },
+      });
+      expect(mockIBClient.placeOrder).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -7,6 +7,10 @@ import { FlexQueryClient } from "./flex-query-client.js";
 import { FlexQueryStorage } from "./flex-query-storage.js";
 import { OrderPolicy } from "./order-policy.js";
 import {
+  OrderIdempotencyStore,
+  type OrderIdempotencyRecord,
+} from "./order-idempotency-store.js";
+import {
   AuthenticateInput,
   GetAccountInfoInput,
   GetPositionsInput,
@@ -32,6 +36,7 @@ export interface ToolHandlerContext {
   config: any;
   flexQueryClient?: FlexQueryClient;
   flexQueryStorage?: FlexQueryStorage;
+  orderIdempotencyStore?: OrderIdempotencyStore;
 }
 
 type ToolHandlerResult = {
@@ -65,11 +70,14 @@ const MAX_FAILED_LOGINS = 5;
 export class ToolHandlers {
   private context: ToolHandlerContext;
   private readonly orderPolicy: OrderPolicy;
+  private readonly orderIdempotencyStore: OrderIdempotencyStore;
   private failedLogins = 0;
 
   constructor(context: ToolHandlerContext) {
     this.context = context;
     this.orderPolicy = new OrderPolicy(context.config);
+    this.orderIdempotencyStore = context.orderIdempotencyStore
+      ?? new OrderIdempotencyStore(context.config.IB_ORDER_IDEMPOTENCY_STORE_PATH || undefined);
     
     // Initialize flex query client and storage if token is provided
     // Only initialize if not already set (useful for testing)
@@ -397,6 +405,35 @@ export class ToolHandlers {
     return `Error: ${errorMessage}`;
   }
 
+  private orderSubmissionErrorPayload(error: unknown): {
+    code: "SUBMISSION_UNCERTAIN" | "ORDER_SUBMISSION_FAILED";
+    message: string;
+    status?: number;
+    ibkrBody?: unknown;
+    transportCode?: string;
+    submissionUncertain: boolean;
+  } | undefined {
+    if (!error || typeof error !== "object") return undefined;
+    const candidate = error as Record<string, unknown>;
+    if (candidate.name !== "OrderSubmissionError" && typeof candidate.submissionUncertain !== "boolean") {
+      return undefined;
+    }
+    const uncertain = candidate.submissionUncertain === true;
+    return {
+      code: uncertain ? "SUBMISSION_UNCERTAIN" : "ORDER_SUBMISSION_FAILED",
+      message: error instanceof Error ? error.message : "Order submission failed",
+      status: typeof candidate.status === "number" ? candidate.status : undefined,
+      ibkrBody: candidate.ibkrBody,
+      transportCode: typeof candidate.transportCode === "string" ? candidate.transportCode : undefined,
+      submissionUncertain: uncertain,
+    };
+  }
+
+  private replayOrderRecord(record: OrderIdempotencyRecord): ToolHandlerResult {
+    if (record.state === "completed") return this.jsonResult(record.response);
+    return this.jsonResult(record);
+  }
+
   async authenticate(input: AuthenticateInput): Promise<ToolHandlerResult> {
     try {
       // An explicit authenticate call is the caller asserting they have fixed whatever
@@ -701,12 +738,16 @@ export class ToolHandlers {
   }
 
   async placeOrder(input: PlaceOrderInput): Promise<ToolHandlerResult> {
+    let order: ReturnType<OrderPolicy["validatePlaceOrder"]> | undefined;
     try {
-      const order = this.orderPolicy.validatePlaceOrder(input);
+      order = this.orderPolicy.validatePlaceOrder(input);
       const auth = await this.ensureAuth();
       if (!auth.ok) {
         return auth.result;
       }
+      const reservation = await this.orderIdempotencyStore.reserve(order);
+      if (!reservation.owner) return this.replayOrderRecord(reservation.record);
+
       const result = await this.context.ibClient.placeOrder({
         clientOrderId: order.clientOrderId,
         accountId: order.accountId,
@@ -719,15 +760,18 @@ export class ToolHandlers {
         exchange: order.exchange,
         tif: order.tif,
       });
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      await this.orderIdempotencyStore.recordResponse(order, result);
+      return this.jsonResult(result);
     } catch (error) {
+      const payload = this.orderSubmissionErrorPayload(error);
+      if (order && payload) {
+        if (payload.submissionUncertain) {
+          await this.orderIdempotencyStore.recordUncertain(order, payload);
+        } else {
+          await this.orderIdempotencyStore.recordResponse(order, payload);
+        }
+        return this.jsonResult(payload);
+      }
       return {
         content: [
           {

@@ -1,6 +1,6 @@
 // test/ib-client.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { IBClient, SymbolNotFoundError } from '../src/ib-client.js';
+import { IBClient, OrderSubmissionError, SymbolNotFoundError } from '../src/ib-client.js';
 
 const { mockSpawn, mockFs } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
@@ -326,7 +326,7 @@ describe('IBClient', () => {
       it('should place limit order successfully', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123', status: 'Submitted' }]));
 
         const orderRequest = {
@@ -354,7 +354,7 @@ describe('IBClient', () => {
       it('should include price for limit orders', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
@@ -376,7 +376,7 @@ describe('IBClient', () => {
       it('should default tif to DAY when not specified', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
@@ -396,7 +396,7 @@ describe('IBClient', () => {
       it('should use the user-provided tif when given', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
@@ -417,7 +417,7 @@ describe('IBClient', () => {
       it('should include exchange in secdef/search URL when provided', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
@@ -440,7 +440,7 @@ describe('IBClient', () => {
       it('should include exchange in the order payload when specified', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
@@ -477,7 +477,7 @@ describe('IBClient', () => {
       it('should include the client order ID for limit orders', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL', sections: [{ secType: 'STK' }] }]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'AAPL', secType: 'STK', currency: 'USD' }))
           .mockResolvedValueOnce(mockResponse([{ id: 'order-123' }]));
 
         await client.placeOrder({
@@ -522,8 +522,8 @@ describe('IBClient', () => {
             { conid: 265598, symbol: 'ABC', sections: [{ secType: 'STK' }] },
             { conid: 765432, symbol: 'ABC', sections: [{ secType: 'STK' }] },
           ]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'ABC', secType: 'STK' }))
-          .mockResolvedValueOnce(mockResponse({ conid: 765432, symbol: 'ABC', secType: 'STK' }));
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'ABC', secType: 'STK', currency: 'USD' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 765432, symbol: 'ABC', secType: 'STK', currency: 'USD' }));
 
         await expect(client.placeOrder({
           clientOrderId: 'codex-ambiguous-symbol',
@@ -544,8 +544,8 @@ describe('IBClient', () => {
             { conid: 265598, symbol: 'ABC', sections: [{ secType: 'STK' }] },
             { conid: 765432, symbol: 'ABC', sections: [{ secType: 'OPT' }] },
           ]))
-          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'ABC', secType: 'STK' }))
-          .mockResolvedValueOnce(mockResponse({ conid: 765432, symbol: 'ABC', secType: 'STK' }));
+          .mockResolvedValueOnce(mockResponse({ conid: 265598, symbol: 'ABC', secType: 'STK', currency: 'USD' }))
+          .mockResolvedValueOnce(mockResponse({ conid: 765432, symbol: 'ABC', secType: 'STK', currency: 'USD' }));
 
         await expect(client.placeOrder({
           clientOrderId: 'codex-authoritative-ambiguity',
@@ -580,6 +580,79 @@ describe('IBClient', () => {
         })).rejects.toThrow(/stock|STK/i);
 
         expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
+      });
+
+      it('should reject a symbol with zero eligible USD stock contracts', async () => {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
+          .mockResolvedValueOnce(mockResponse({
+            conid: 265598,
+            symbol: 'AAPL',
+            secType: 'STK',
+            currency: 'EUR',
+          }));
+
+        await expect(client.placeOrder({
+          clientOrderId: 'codex-eur-symbol',
+          accountId: 'U12345',
+          symbol: 'AAPL',
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        })).rejects.toThrow(/USD|eligible/i);
+
+        expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
+      });
+
+      it('should reject an explicit conid unless authoritative metadata is STK and USD', async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse({
+          conid: 265598,
+          symbol: 'AAPL',
+          secType: 'STK',
+          currency: 'CAD',
+        }));
+
+        await expect(client.placeOrder({
+          clientOrderId: 'codex-cad-conid',
+          accountId: 'U12345',
+          conid: 265598,
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        })).rejects.toThrow(/USD/i);
+
+        expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
+      });
+
+      it('should preserve status and the raw IBKR response body on submission errors', async () => {
+        const ibkrBody = { error: 'Order rejected', errorCode: 201, detail: { field: 'price' } };
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({
+            conid: 265598,
+            symbol: 'AAPL',
+            secType: 'STK',
+            currency: 'USD',
+          }))
+          .mockResolvedValueOnce(mockResponse(ibkrBody, 400));
+
+        const error = await client.placeOrder({
+          clientOrderId: 'codex-rejected-conid',
+          accountId: 'U12345',
+          conid: 265598,
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        }).catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(OrderSubmissionError);
+        expect(error).toMatchObject({
+          status: 400,
+          ibkrBody,
+          submissionUncertain: false,
+        });
       });
     });
 
