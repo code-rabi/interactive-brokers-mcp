@@ -46,6 +46,7 @@ describe('ToolHandlers', () => {
       getOrderStatus: vi.fn().mockResolvedValue({ status: 'Filled' }),
       getOrders: vi.fn().mockResolvedValue([]),
       confirmOrder: vi.fn().mockResolvedValue({ confirmed: true }),
+      cancelOrder: vi.fn().mockResolvedValue({ orderId: '123', status: 'Cancelled' }),
       destroy: vi.fn(),
       updatePort: vi.fn(),
       getAlerts: vi.fn().mockResolvedValue([]),
@@ -386,6 +387,53 @@ describe('ToolHandlers', () => {
 
       expect(result.content).toBeDefined();
       expect(mockIBClient.confirmOrder).toHaveBeenCalledWith('reply-123', ['msg1', 'msg2']);
+    });
+  });
+
+  describe('cancelOrder', () => {
+    it('should enforce the allowed account and preserve the broker response', async () => {
+      const brokerResponse = { orderId: '123', status: 'Cancelled', detail: { remaining: 0 } };
+      mockIBClient.cancelOrder = vi.fn().mockResolvedValue(brokerResponse);
+
+      const result = await handlers.cancelOrder({ accountId: 'U12345', orderId: '123' });
+
+      expect(mockIBClient.cancelOrder).toHaveBeenCalledWith('U12345', '123');
+      expect(JSON.parse(result.content[0].text)).toEqual(brokerResponse);
+    });
+
+    it('should reject an account mismatch before authentication or cancellation', async () => {
+      const result = await handlers.cancelOrder({ accountId: 'U99999', orderId: '123' });
+
+      expect(result.content[0].text).toContain('U12345');
+      expect(mockIBClient.checkAuthenticationStatus).not.toHaveBeenCalled();
+      expect(mockIBClient.cancelOrder).not.toHaveBeenCalled();
+    });
+
+    it('should return structured broker rejection status and body', async () => {
+      mockIBClient.cancelOrder = vi.fn().mockRejectedValue(Object.assign(new Error('Cancellation rejected'), {
+        name: 'OrderCancellationError',
+        status: 400,
+        ibkrBody: { error: 'Order cannot be cancelled', errorCode: 10147 },
+      }));
+
+      const result = await handlers.cancelOrder({ accountId: 'U12345', orderId: '123' });
+
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        code: 'ORDER_CANCELLATION_FAILED',
+        message: 'Cancellation rejected',
+        status: 400,
+        ibkrBody: { error: 'Order cannot be cancelled', errorCode: 10147 },
+      });
+    });
+
+    it('should surface authentication failures through the normal authentication guidance', async () => {
+      mockIBClient.cancelOrder = vi.fn().mockRejectedValue(Object.assign(new Error('not authenticated'), {
+        response: { status: 401, data: { error: 'not authenticated' } },
+      }));
+
+      const result = await handlers.cancelOrder({ accountId: 'U12345', orderId: '123' });
+
+      expect(result.content[0].text).toMatch(/Authentication required/);
     });
   });
 

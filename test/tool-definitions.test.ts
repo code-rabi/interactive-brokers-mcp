@@ -10,6 +10,7 @@ import {
   CreateAlertZodSchema,
   ActivateAlertZodSchema,
   DeleteAlertZodSchema,
+  CancelOrderZodSchema,
 } from '../src/tool-definitions.js';
 
 describe('Tool Definitions - Zod Schemas', () => {
@@ -341,6 +342,18 @@ describe('Tool Definitions - Zod Schemas', () => {
         messageIds: 'msg1',
       });
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe('CancelOrderZodSchema', () => {
+    it('should require non-blank accountId and orderId', () => {
+      expect(CancelOrderZodSchema.safeParse({}).success).toBe(false);
+      expect(CancelOrderZodSchema.safeParse({ accountId: ' ', orderId: '123' }).success).toBe(false);
+      expect(CancelOrderZodSchema.safeParse({ accountId: 'U12345', orderId: ' ' }).success).toBe(false);
+    });
+
+    it('should accept an account-scoped cancellation', () => {
+      expect(CancelOrderZodSchema.safeParse({ accountId: 'U12345', orderId: '123' }).success).toBe(true);
     });
   });
 

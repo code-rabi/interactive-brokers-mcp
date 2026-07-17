@@ -15,6 +15,7 @@ const WRITE_TOOLS = [
   "create_alert",
   "activate_alert",
   "delete_alert",
+  "cancel_order",
 ];
 
 describe("read-only safety defaults", () => {

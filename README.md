@@ -73,6 +73,11 @@ When you first use the server, a web browser window will automatically open for
 the Interactive Brokers OAuth authentication flow. Log in with your IB
 credentials to authorize the connection.
 
+Browser authentication is recommended for local use because it avoids placing
+your IBKR password or 2FA secret in the MCP process configuration. Headless
+credentials remain available for environments that explicitly require them,
+but they increase the impact of a compromised host or configuration file.
+
 ## Headless Mode Configuration
 
 For automated environments or when you prefer not to use a browser for
@@ -208,6 +213,18 @@ must provide a unique `clientOrderId`, a positive finite quantity and price,
 and either a symbol or conid that IBKR resolves unambiguously to a `STK`
 contract.
 
+Every HTTP failure returned while submitting an order is reported as an
+uncertain submission outcome. The server will not automatically retry that
+`clientOrderId`; check IBKR live orders and executions manually before taking
+another action. Broker warnings are not auto-confirmed. Review them and invoke
+`confirm_order` explicitly only when the warning is understood.
+
+`cancel_order` is exposed under the same live-write conditions: explicit
+`IB_READ_ONLY_MODE=false` and a configured `IB_ALLOWED_ACCOUNT_ID`. Its
+`accountId` must match that single allowlisted account. Cancellation does not
+use the order-submission `clientOrderId` idempotency mechanism; verify the raw
+broker response and then check `get_live_orders` to confirm the final state.
+
 ## Gateway Lifecycle
 
 On startup, the MCP first probes reachable local Gateway endpoints on the configured port and common Client Portal Gateway ports. If a healthy existing Gateway is found, the MCP attaches to it and does not start another bundled Gateway.
@@ -232,6 +249,8 @@ To reset the managed Gateway session, stop the Gateway process recorded in `ib-g
 | `get_positions`    | Get current positions and P&L             |
 | `get_market_data`  | Real-time market data for symbols         |
 | `place_order`      | Place limit stock orders for the allowlisted account (only when live writes are explicitly enabled) |
+| `confirm_order`    | Manually confirm a broker warning (only when live writes are explicitly enabled) |
+| `cancel_order`     | Cancel an order for the allowlisted account and return the raw broker response (only when live writes are explicitly enabled) |
 | `get_order_status` | Check order execution status              |
 | `get_live_orders`  | Get all live/open orders for monitoring   |
 

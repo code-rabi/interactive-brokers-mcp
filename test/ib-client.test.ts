@@ -1,6 +1,6 @@
 // test/ib-client.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { IBClient, OrderSubmissionError, SymbolNotFoundError } from '../src/ib-client.js';
+import { IBClient, OrderCancellationError, OrderSubmissionError, SymbolNotFoundError } from '../src/ib-client.js';
 
 const { mockSpawn, mockFs } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
@@ -827,6 +827,67 @@ describe('IBClient', () => {
           expect.objectContaining({ method: 'GET' })
         );
         expect(result).toEqual(mockOrders);
+      });
+    });
+
+    describe('cancelOrder', () => {
+      it('should send DELETE to the exact account-scoped order path and preserve the broker response', async () => {
+        const brokerResponse = { orderId: '123', status: 'Cancelled', message: ['Order cancelled'] };
+        mockFetch.mockResolvedValueOnce(mockResponse(brokerResponse));
+
+        const result = await client.cancelOrder('U12345', '123');
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          'https://localhost:5000/v1/api/iserver/account/U12345/order/123',
+          expect.objectContaining({ method: 'DELETE' }),
+        );
+        expect(result).toEqual(brokerResponse);
+      });
+
+      it('should preserve structured broker rejection status and body', async () => {
+        const ibkrBody = { error: 'Order cannot be cancelled', errorCode: 10147 };
+        mockFetch.mockResolvedValueOnce(mockResponse(ibkrBody, 400));
+
+        const error = await client.cancelOrder('U12345', '123').catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(OrderCancellationError);
+        expect(error).toMatchObject({ status: 400, ibkrBody });
+      });
+
+      it('should preserve a non-authentication HTTP 500 status and broker body', async () => {
+        const ibkrBody = { error: 'Cancellation backend failed', traceId: 'ibkr-500' };
+        mockFetch.mockResolvedValueOnce(mockResponse(ibkrBody, 500));
+
+        const error = await client.cancelOrder('U12345', '123').catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(OrderCancellationError);
+        expect(error).toMatchObject({ status: 500, ibkrBody });
+      });
+
+      it('should preserve authentication failures instead of replacing them with a generic cancellation error', async () => {
+        const authBody = { error: 'not authenticated' };
+        mockFetch.mockResolvedValueOnce(mockResponse(authBody, 401));
+
+        const error = await client.cancelOrder('U12345', '123').catch((caught) => caught);
+
+        expect(error).not.toBeInstanceOf(OrderCancellationError);
+        expect(error).toMatchObject({
+          name: 'HttpError',
+          response: { status: 401, data: authBody },
+        });
+      });
+
+      it('should preserve IBKR authentication failures carried in HTTP 500 responses', async () => {
+        const authBody = { error: { message: 'authentication required' } };
+        mockFetch.mockResolvedValueOnce(mockResponse(authBody, 500));
+
+        const error = await client.cancelOrder('U12345', '123').catch((caught) => caught);
+
+        expect(error).not.toBeInstanceOf(OrderCancellationError);
+        expect(error).toMatchObject({
+          name: 'HttpError',
+          response: { status: 500, data: authBody },
+        });
       });
     });
 

@@ -40,6 +40,28 @@ export class OrderSubmissionError extends Error {
   }
 }
 
+export class OrderCancellationError extends Error {
+  readonly status: number;
+  readonly ibkrBody: unknown;
+
+  constructor(options: {
+    message: string;
+    status: number;
+    ibkrBody: unknown;
+    cause?: unknown;
+  }) {
+    super(options.message, { cause: options.cause });
+    this.name = "OrderCancellationError";
+    this.status = options.status;
+    Object.defineProperty(this, "ibkrBody", {
+      value: options.ibkrBody,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+}
+
 export interface PreparedOrder {
   accountId: string;
   order: OrderPayload;
@@ -83,6 +105,22 @@ function transportCode(error: unknown): string | undefined {
   const code = candidate.code ?? candidate.cause?.code;
   if (typeof code === "string") return code;
   return typeof candidate.name === "string" ? candidate.name : undefined;
+}
+
+function httpErrorSignalsAuthentication(error: HttpError): boolean {
+  if (error.response.status === 401 || error.response.status === 403) return true;
+  let body: string;
+  try {
+    body = typeof error.response.data === "string"
+      ? error.response.data
+      : JSON.stringify(error.response.data);
+  } catch {
+    return false;
+  }
+  const normalized = body.toLowerCase();
+  return normalized.includes("not authenticated")
+    || normalized.includes("authentication required")
+    || normalized.includes("unauthorized");
 }
 
 async function submitOrder(
@@ -272,6 +310,43 @@ export async function confirmOrder(client: IBClientRequester, replyId: string, m
       throw new AuthenticationError("Authentication required to confirm orders. Please authenticate with Interactive Brokers first.");
     }
     throw new Error("Failed to confirm order: " + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
+export async function cancelOrder(
+  client: IBClientRequester,
+  accountId: string,
+  orderId: string,
+): Promise<unknown> {
+  try {
+    const response = await client.request(
+      "DELETE",
+      `/iserver/account/${encodeURIComponent(accountId)}/order/${encodeURIComponent(orderId)}`,
+    );
+    return response.data;
+  } catch (error: unknown) {
+    // Preserve explicit authentication failures so the handler can return the
+    // normal browser-auth guidance. Do not classify every HTTP 500 as auth here:
+    // cancellation rejections must retain their broker status and body.
+    if (error instanceof HttpError && httpErrorSignalsAuthentication(error)) {
+      Logger.error("Failed to cancel order: authentication required");
+      throw error;
+    }
+    if (error instanceof HttpError) {
+      Logger.error("Failed to cancel order:", {
+        name: "OrderCancellationError",
+        status: error.response.status,
+      });
+      throw new OrderCancellationError({
+        message: `Order cancellation failed with HTTP status ${error.response.status}`,
+        status: error.response.status,
+        ibkrBody: error.response.data,
+        cause: error,
+      });
+    }
+    if (isAuthenticationError(error)) throw error;
+    Logger.error("Failed to cancel order:", error instanceof Error ? error.message : String(error));
+    throw error;
   }
 }
 

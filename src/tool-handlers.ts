@@ -21,6 +21,7 @@ import {
   GetOrderStatusInput,
   GetLiveOrdersInput,
   ConfirmOrderInput,
+  CancelOrderInput,
   GetAlertsInput,
   CreateAlertInput,
   ActivateAlertInput,
@@ -426,6 +427,25 @@ export class ToolHandlers {
       ibkrBody: candidate.ibkrBody,
       transportCode: typeof candidate.transportCode === "string" ? candidate.transportCode : undefined,
       submissionUncertain: uncertain,
+    };
+  }
+
+  private orderCancellationErrorPayload(error: unknown): {
+    code: "ORDER_CANCELLATION_FAILED";
+    message: string;
+    status: number;
+    ibkrBody: unknown;
+  } | undefined {
+    if (!error || typeof error !== "object") return undefined;
+    const candidate = error as Record<string, unknown>;
+    if (candidate.name !== "OrderCancellationError" || typeof candidate.status !== "number") {
+      return undefined;
+    }
+    return {
+      code: "ORDER_CANCELLATION_FAILED",
+      message: error instanceof Error ? error.message : "Order cancellation failed",
+      status: candidate.status,
+      ibkrBody: candidate.ibkrBody,
     };
   }
 
@@ -905,6 +925,18 @@ export class ToolHandlers {
           },
         ],
       };
+    }
+  }
+
+  async cancelOrder(input: CancelOrderInput): Promise<ToolHandlerResult> {
+    try {
+      this.orderPolicy.assertAllowedAccount(input.accountId);
+      const auth = await this.ensureAuth();
+      if (!auth.ok) return auth.result;
+      return this.jsonResult(await this.context.ibClient.cancelOrder(input.accountId, input.orderId));
+    } catch (error) {
+      const structured = this.orderCancellationErrorPayload(error);
+      return structured ? this.jsonResult(structured) : this.textResult(this.formatError(error));
     }
   }
 

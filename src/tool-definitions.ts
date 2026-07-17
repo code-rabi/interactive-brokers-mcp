@@ -63,6 +63,11 @@ export const ConfirmOrderZodShape = {
   messageIds: z.array(z.string())
 };
 
+export const CancelOrderZodShape = {
+  accountId: z.string().trim().min(1),
+  orderId: z.string().trim().min(1)
+};
+
 export const GetAlertsZodShape = {
   accountId: z.string()
 };
@@ -134,6 +139,7 @@ export const PlaceOrderZodSchema = z.object(PlaceOrderZodShape).strict();
 export const GetOrderStatusZodSchema = z.object(GetOrderStatusZodShape);
 export const GetLiveOrdersZodSchema = z.object(GetLiveOrdersZodShape);
 export const ConfirmOrderZodSchema = z.object(ConfirmOrderZodShape);
+export const CancelOrderZodSchema = z.object(CancelOrderZodShape).strict();
 export const GetAlertsZodSchema = z.object(GetAlertsZodShape);
 export const CreateAlertZodSchema = z.object(CreateAlertZodShape);
 export const ActivateAlertZodSchema = z.object(ActivateAlertZodShape);
@@ -152,6 +158,7 @@ export type PlaceOrderInput = z.infer<typeof PlaceOrderZodSchema>;
 export type GetOrderStatusInput = z.infer<typeof GetOrderStatusZodSchema>;
 export type GetLiveOrdersInput = z.infer<typeof GetLiveOrdersZodSchema>;
 export type ConfirmOrderInput = z.infer<typeof ConfirmOrderZodSchema>;
+export type CancelOrderInput = z.infer<typeof CancelOrderZodSchema>;
 export type GetAlertsInput = z.infer<typeof GetAlertsZodSchema>;
 export type CreateAlertInput = z.infer<typeof CreateAlertZodSchema>;
 export type ActivateAlertInput = z.infer<typeof ActivateAlertZodSchema>;

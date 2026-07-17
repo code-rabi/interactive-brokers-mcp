@@ -7,6 +7,7 @@ import {
   ActivateAlertZodShape,
   AuthenticateZodShape,
   ConfirmOrderZodShape,
+  CancelOrderZodShape,
   CreateAlertZodShape,
   DeleteAlertZodShape,
   ForgetFlexQueryZodShape,
@@ -132,6 +133,12 @@ export function registerTools(
       "Manually confirm an order that requires confirmation. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\", \"messageIds\": [\"o10151\", \"o10153\"] }`.",
       ConfirmOrderZodShape,
       async (args) => await handlers.confirmOrder(args),
+    );
+    registerTool(
+      "cancel_order",
+      "Cancel a specific order in the allowlisted account. Verify the returned broker response and then check live orders. Usage: `{ \"accountId\": \"U12345\", \"orderId\": \"12345\" }`.",
+      CancelOrderZodShape,
+      async (args) => await handlers.cancelOrder(args),
     );
   }
 

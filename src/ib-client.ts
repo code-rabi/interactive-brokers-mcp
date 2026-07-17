@@ -19,9 +19,11 @@ import {
   prepareOrder,
   submitPreparedOrder,
   confirmOrder,
+  cancelOrder,
   getOrderStatus,
   getOrders,
   OrderSubmissionError,
+  OrderCancellationError,
   type PreparedOrder,
 } from "./ib-client/orders.js";
 import { getAlerts, createAlert, activateAlert, deleteAlert } from "./ib-client/alerts.js";
@@ -39,7 +41,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-export { SymbolNotFoundError, InvalidOrderContractError, OrderSubmissionError };
+export { SymbolNotFoundError, InvalidOrderContractError, OrderSubmissionError, OrderCancellationError };
 
 // ---------------------------------------------------------------------------
 // Client
@@ -87,10 +89,13 @@ export class IBClient {
     const requestId = Math.random().toString(36).substr(2, 9);
     const isOrderSubmission = method.toUpperCase() === "POST"
       && /^\/iserver\/account\/[^/]+\/orders$/.test(urlPath);
+    const isOrderCancellation = method.toUpperCase() === "DELETE"
+      && /^\/iserver\/account\/[^/]+\/order\/[^/]+$/.test(urlPath);
+    const isOrderMutation = isOrderSubmission || isOrderCancellation;
     Logger.log(`[REQUEST-${requestId}] ${method} ${urlPath}`, {
       timeout: options?.timeout ?? 30000,
       headers: options?.headers,
-      data: isOrderSubmission ? "[REDACTED ORDER REQUEST]" : options?.body,
+      data: isOrderMutation ? "[REDACTED ORDER REQUEST]" : options?.body,
     });
 
     if (!this.isAuthenticated) {
@@ -106,7 +111,7 @@ export class IBClient {
       Logger.log(`[RESPONSE-${requestId}] ${result.status} ${result.statusText}`, {
         url: urlPath,
         responseSize: JSON.stringify(result.data).length,
-        dataPreview: isOrderSubmission
+        dataPreview: isOrderMutation
           ? "[REDACTED ORDER RESPONSE]"
           : JSON.stringify(result.data).substring(0, 500) + "...",
       });
@@ -118,7 +123,7 @@ export class IBClient {
           status: error.response.status,
           statusText: error.response.statusText,
           message: error.message,
-          responseData: isOrderSubmission ? "[REDACTED ORDER RESPONSE]" : error.response.data,
+          responseData: isOrderMutation ? "[REDACTED ORDER RESPONSE]" : error.response.data,
         });
       } else {
         Logger.error(`[ERROR-${requestId}] Request failed:`, error instanceof Error ? error.message : String(error));
@@ -561,6 +566,10 @@ export class IBClient {
 
   async confirmOrder(replyId: string, messageIds: string[]): Promise<unknown> {
     return confirmOrder(this, replyId, messageIds);
+  }
+
+  async cancelOrder(accountId: string, orderId: string): Promise<unknown> {
+    return cancelOrder(this, accountId, orderId);
   }
 
   async getOrderStatus(orderId: string): Promise<unknown> {
