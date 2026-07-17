@@ -431,7 +431,16 @@ export class ToolHandlers {
 
   private replayOrderRecord(record: OrderIdempotencyRecord): ToolHandlerResult {
     if (record.state === "completed") return this.jsonResult(record.response);
-    return this.jsonResult(record);
+    return this.jsonResult({
+      code: "SUBMISSION_UNCERTAIN",
+      message: "This clientOrderId may already have been submitted. Check IBKR live orders and executions manually before taking any further action.",
+      submissionUncertain: true,
+      persistedRecord: record,
+      manualReconciliation: [
+        "Search IBKR live orders and executions for this clientOrderId.",
+        "Do not submit a replacement order automatically.",
+      ],
+    });
   }
 
   async authenticate(input: AuthenticateInput): Promise<ToolHandlerResult> {
@@ -739,27 +748,23 @@ export class ToolHandlers {
 
   async placeOrder(input: PlaceOrderInput): Promise<ToolHandlerResult> {
     let order: ReturnType<OrderPolicy["validatePlaceOrder"]> | undefined;
+    let submissionAttempted = false;
     try {
       order = this.orderPolicy.validatePlaceOrder(input);
       const auth = await this.ensureAuth();
       if (!auth.ok) {
         return auth.result;
       }
+      const existing = await this.orderIdempotencyStore.lookup(order);
+      if (existing) return this.replayOrderRecord(existing);
+      // Resolve and validate the contract before consuming the durable ID. The
+      // reservation is intentionally adjacent to the only side-effecting POST.
+      const prepared = await this.context.ibClient.prepareOrder(order);
       const reservation = await this.orderIdempotencyStore.reserve(order);
       if (!reservation.owner) return this.replayOrderRecord(reservation.record);
 
-      const result = await this.context.ibClient.placeOrder({
-        clientOrderId: order.clientOrderId,
-        accountId: order.accountId,
-        symbol: order.symbol,
-        conid: order.conid,
-        action: order.action,
-        orderType: order.orderType,
-        quantity: order.quantity,
-        price: order.price,
-        exchange: order.exchange,
-        tif: order.tif,
-      });
+      submissionAttempted = true;
+      const result = await this.context.ibClient.submitPreparedOrder(prepared);
       await this.orderIdempotencyStore.recordResponse(order, result);
       return this.jsonResult(result);
     } catch (error) {
@@ -771,6 +776,19 @@ export class ToolHandlers {
           await this.orderIdempotencyStore.recordResponse(order, payload);
         }
         return this.jsonResult(payload);
+      }
+      if (order && submissionAttempted) {
+        const uncertain = {
+          code: "SUBMISSION_UNCERTAIN" as const,
+          message: `The order POST may have reached IBKR, but its terminal result could not be persisted: ${error instanceof Error ? error.message : String(error)}. Check IBKR manually before taking any further action.`,
+          submissionUncertain: true,
+          manualReconciliation: [
+            "Search IBKR live orders and executions for this clientOrderId.",
+            "Do not submit a replacement order automatically.",
+          ],
+        };
+        await this.orderIdempotencyStore.recordUncertain(order, uncertain).catch(() => undefined);
+        return this.jsonResult(uncertain);
       }
       return {
         content: [

@@ -48,12 +48,17 @@ function isExplicitBrokerRejection(status: number, body: unknown): boolean {
   return candidates.some((candidate) => {
     if (!candidate || typeof candidate !== "object") return false;
     const value = candidate as Record<string, unknown>;
-    const code = value.errorCode ?? value.error_code ?? value.code;
+    const code = value.errorCode ?? value.error_code;
     const message = value.error ?? value.message;
-    return (typeof code === "number" || typeof code === "string")
+    return (typeof code === "number" || (typeof code === "string" && /^\d+$/.test(code)))
       && typeof message === "string"
-      && /reject|invalid|insufficient|not allowed|cannot|exceed/i.test(message);
+      && /reject|insufficient|not allowed|exceed/i.test(message);
   });
+}
+
+export interface PreparedOrder {
+  accountId: string;
+  order: OrderPayload;
 }
 
 async function fetchAuthoritativeContract(
@@ -181,11 +186,13 @@ async function getOrderAccountIds(client: IBClientRequester): Promise<string[]> 
   return [];
 }
 
-export async function placeOrder(client: IBClientRequester, orderRequest: OrderRequest): Promise<unknown> {
-  try {
-    if (orderRequest.conid !== undefined) {
-      const contract = await resolveAuthoritativeStock(client, orderRequest.conid, orderRequest.symbol);
-      const order: OrderPayload = {
+export async function prepareOrder(
+  client: IBClientRequester,
+  orderRequest: OrderRequest,
+): Promise<PreparedOrder> {
+  if (orderRequest.conid !== undefined) {
+    const contract = await resolveAuthoritativeStock(client, orderRequest.conid, orderRequest.symbol);
+    const order: OrderPayload = {
         conid: Number(contract.conid),
         cOID: orderRequest.clientOrderId,
         orderType: orderRequest.orderType,
@@ -193,40 +200,39 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
         quantity: Number(orderRequest.quantity),
         price: Number(orderRequest.price),
         tif: orderRequest.tif || "DAY",
-      };
+    };
+    if (orderRequest.exchange) order.exchange = orderRequest.exchange;
+    return { accountId: orderRequest.accountId, order };
+  }
 
-      if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-      return submitOrder(client, orderRequest.accountId, order);
-    }
+  if (!orderRequest.symbol) {
+    throw new Error("Symbol is required when conid is not provided");
+  }
 
-    if (!orderRequest.symbol) {
-      throw new Error("Symbol is required when conid is not provided");
-    }
+  let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
+  if (orderRequest.exchange) searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
+  const searchResponse = await client.request<ContractSearch[]>("GET", searchUrl);
 
-    let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
-    if (orderRequest.exchange) searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
-    const searchResponse = await client.request<ContractSearch[]>("GET", searchUrl);
+  if (!searchResponse.data || searchResponse.data.length === 0) {
+    throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? " on " + orderRequest.exchange : ""} not found`);
+  }
 
-    if (!searchResponse.data || searchResponse.data.length === 0) {
-      throw new SymbolNotFoundError(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? " on " + orderRequest.exchange : ""} not found`);
-    }
+  const candidateConids = [...new Set(searchResponse.data.map((candidate) => Number(candidate.conid)))];
+  const authoritativeCandidates = await Promise.all(
+    candidateConids.map((conid) => fetchAuthoritativeContract(client, conid)),
+  );
+  const stockCandidates = authoritativeCandidates.filter(
+    (candidate) => candidate.secType === "STK"
+      && candidate.currency === "USD"
+      && candidate.symbol.toUpperCase() === orderRequest.symbol!.toUpperCase(),
+  );
+  if (stockCandidates.length !== 1) {
+    const reason = stockCandidates.length === 0 ? "no eligible USD STK stock contract" : "ambiguous eligible USD STK stock contracts";
+    throw new InvalidOrderContractError(`Symbol ${orderRequest.symbol} resolved to ${reason}`);
+  }
 
-    const candidateConids = [...new Set(searchResponse.data.map((candidate) => Number(candidate.conid)))];
-    const authoritativeCandidates = await Promise.all(
-      candidateConids.map((conid) => fetchAuthoritativeContract(client, conid)),
-    );
-    const stockCandidates = authoritativeCandidates.filter(
-      (candidate) => candidate.secType === "STK"
-        && candidate.currency === "USD"
-        && candidate.symbol.toUpperCase() === orderRequest.symbol!.toUpperCase(),
-    );
-    if (stockCandidates.length !== 1) {
-      const reason = stockCandidates.length === 0 ? "no eligible USD STK stock contract" : "ambiguous eligible USD STK stock contracts";
-      throw new InvalidOrderContractError(`Symbol ${orderRequest.symbol} resolved to ${reason}`);
-    }
-
-    const contract = stockCandidates[0];
-    const order: OrderPayload = {
+  const contract = stockCandidates[0];
+  const order: OrderPayload = {
       conid: Number(contract.conid),
       cOID: orderRequest.clientOrderId,
       orderType: orderRequest.orderType,
@@ -234,9 +240,22 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
       quantity: Number(orderRequest.quantity),
       price: Number(orderRequest.price),
       tif: orderRequest.tif || "DAY",
-    };
-    if (orderRequest.exchange) order.exchange = orderRequest.exchange;
-    return submitOrder(client, orderRequest.accountId, order);
+  };
+  if (orderRequest.exchange) order.exchange = orderRequest.exchange;
+  return { accountId: orderRequest.accountId, order };
+}
+
+export async function submitPreparedOrder(
+  client: IBClientRequester,
+  prepared: PreparedOrder,
+): Promise<unknown> {
+  return submitOrder(client, prepared.accountId, prepared.order);
+}
+
+export async function placeOrder(client: IBClientRequester, orderRequest: OrderRequest): Promise<unknown> {
+  try {
+    const prepared = await prepareOrder(client, orderRequest);
+    return await submitPreparedOrder(client, prepared);
   } catch (error: unknown) {
     if (error instanceof OrderSubmissionError) {
       Logger.error("Failed to place order:", {

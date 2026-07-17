@@ -702,6 +702,32 @@ describe('IBClient', () => {
 
         expect(error).toMatchObject({ status: 400, submissionUncertain: true });
       });
+
+      it.each([400, 409])('should treat misleading HTTP %s proxy JSON as submission uncertain', async (status) => {
+        const proxyBody = status === 400
+          ? { code: 'BAD_GATEWAY', message: 'Cannot parse invalid upstream response' }
+          : { errorCode: 'BAD_GATEWAY', message: 'Cannot parse invalid upstream response' };
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({
+            conid: 265598,
+            symbol: 'AAPL',
+            secType: 'STK',
+            currency: 'USD',
+          }))
+          .mockResolvedValueOnce(mockResponse(proxyBody, status));
+
+        const error = await client.placeOrder({
+          clientOrderId: `codex-proxy-${status}`,
+          accountId: 'U12345',
+          conid: 265598,
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        }).catch((caught) => caught);
+
+        expect(error).toMatchObject({ status, ibkrBody: proxyBody, submissionUncertain: true });
+      });
     });
 
     describe('getOrders', () => {

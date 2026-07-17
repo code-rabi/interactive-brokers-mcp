@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +11,25 @@ afterEach(async () => {
 });
 
 describe("Logger order-error security", () => {
+  it("tightens an existing log before appending", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ib-mcp-logger-existing-"));
+    dirs.push(root);
+    const logDir = path.join(root, "logs");
+    const logFile = path.join(logDir, "ib-mcp.log");
+    await mkdir(logDir, { recursive: true });
+    await writeFile(logFile, "old\n", { mode: 0o644 });
+    await chmod(logFile, 0o644);
+    const script = "const { Logger } = await import('./src/logger.ts'); Logger.info('new-secret-free-line');";
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      cwd: process.cwd(),
+      env: { ...process.env, IB_MCP_LOG_DIR: logDir },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    expect(await new Promise<number | null>((resolve) => child.once("exit", resolve))).toBe(0);
+    expect((await stat(logFile)).mode & 0o777).toBe(0o600);
+    expect(await readFile(logFile, "utf8")).toContain("new-secret-free-line");
+  });
+
   it("uses private modes and does not log the raw IBKR body", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ib-mcp-logger-"));
     dirs.push(root);

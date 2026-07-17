@@ -38,8 +38,8 @@ export class Logger {
         Logger.serializeArgument(arg)
       ).join(' ') : '';
       const logLine = `${timestamp} [${level}] ${message}${argsStr}\n`;
+      if (existsSync(Logger.logFile)) chmodSync(Logger.logFile, 0o600);
       appendFileSync(Logger.logFile, logLine, { encoding: 'utf8', mode: 0o600 });
-      chmodSync(Logger.logFile, 0o600);
     } catch (error) {
       // Silently fail to avoid recursive logging issues
     }

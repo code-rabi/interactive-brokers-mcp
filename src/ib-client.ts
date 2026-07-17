@@ -14,7 +14,16 @@ import {
 import { getAccountInfo, getPositions } from "./ib-client/accounts.js";
 import { getMarketData } from "./ib-client/market-data.js";
 import { getOptionChain, resolveOptionConid } from "./ib-client/options.js";
-import { placeOrder, confirmOrder, getOrderStatus, getOrders, OrderSubmissionError } from "./ib-client/orders.js";
+import {
+  placeOrder,
+  prepareOrder,
+  submitPreparedOrder,
+  confirmOrder,
+  getOrderStatus,
+  getOrders,
+  OrderSubmissionError,
+  type PreparedOrder,
+} from "./ib-client/orders.js";
 import { getAlerts, createAlert, activateAlert, deleteAlert } from "./ib-client/alerts.js";
 import {
   type AuthStatusResponse,
@@ -540,6 +549,14 @@ export class IBClient {
 
   async placeOrder(orderRequest: OrderRequest): Promise<unknown> {
     return placeOrder(this, orderRequest);
+  }
+
+  async prepareOrder(orderRequest: OrderRequest): Promise<PreparedOrder> {
+    return prepareOrder(this, orderRequest);
+  }
+
+  async submitPreparedOrder(prepared: PreparedOrder): Promise<unknown> {
+    return submitPreparedOrder(this, prepared);
   }
 
   async confirmOrder(replyId: string, messageIds: string[]): Promise<unknown> {

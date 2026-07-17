@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, open, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -68,6 +68,40 @@ describe("OrderIdempotencyStore", () => {
     const reservations = await Promise.all(stores.map((store) => store.reserve(request)));
 
     expect(reservations.filter((entry) => entry.owner)).toHaveLength(1);
+  });
+
+  it("publishes only complete owner metadata and never grants two owners when one initializer is paused", async () => {
+    const file = await makeStorePath();
+    let releaseFirstLink!: () => void;
+    const firstLinkPaused = new Promise<void>((resolve) => { releaseFirstLink = resolve; });
+    let firstReachedLink!: () => void;
+    const firstAtLink = new Promise<void>((resolve) => { firstReachedLink = resolve; });
+    let pause = true;
+    const slow = new OrderIdempotencyStore(file, {
+      lockInitializationGraceMs: 0,
+      fileSystem: {
+        link: async (source, destination) => {
+          if (pause) {
+            pause = false;
+            firstReachedLink();
+            await firstLinkPaused;
+          }
+          await link(source, destination);
+        },
+      },
+    });
+    const competitor = new OrderIdempotencyStore(file, { lockInitializationGraceMs: 0 });
+
+    const slowReservation = slow.reserve(request);
+    await firstAtLink;
+    const competitorReservation = await competitor.reserve(request);
+    releaseFirstLink();
+    const delayedReservation = await slowReservation;
+
+    expect([competitorReservation, delayedReservation].filter((entry) => entry.owner)).toHaveLength(1);
+    expect(competitorReservation.owner).toBe(true);
+    expect(delayedReservation.owner).toBe(false);
+    await expect(readFile(`${file}.lock`, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("keeps uncertain submissions non-retryable after restart", async () => {
@@ -174,7 +208,7 @@ describe("OrderIdempotencyStore", () => {
       fileSystem: {
         open: async (target, flags, mode) => {
           const handle = await open(target, flags, mode);
-          if (target === lockPath) {
+          if (String(target).startsWith(`${lockPath}.`) && String(target).endsWith(".owner")) {
             handle.sync = async () => { throw new Error("injected lock fsync failure"); };
           }
           return handle;
@@ -183,7 +217,46 @@ describe("OrderIdempotencyStore", () => {
     });
 
     await expect(store.reserve(request)).rejects.toThrow("injected lock fsync failure");
-    expect(await readdir(path.dirname(file))).not.toContain(path.basename(lockPath));
+    expect((await readdir(path.dirname(file))).filter((name) => name.includes(".lock"))).toEqual([]);
+  });
+
+  it("cleans an unpublished owner file and preserves the write error when close also fails", async () => {
+    const file = await makeStorePath();
+    const store = new OrderIdempotencyStore(file, {
+      fileSystem: {
+        open: async (target, flags, mode) => {
+          const handle = await open(target, flags, mode);
+          if (String(target).includes(".lock.") && String(target).endsWith(".owner")) {
+            handle.writeFile = async () => { throw new Error("primary owner write failure"); };
+            handle.close = async () => { throw new Error("secondary owner close failure"); };
+          }
+          return handle;
+        },
+      },
+    });
+
+    await expect(store.reserve(request)).rejects.toThrow("primary owner write failure");
+    expect((await readdir(path.dirname(file))).filter((name) => name.endsWith(".owner"))).toEqual([]);
+  });
+
+  it("cleans a temp file and preserves the write error when close also fails", async () => {
+    const file = await makeStorePath();
+    const store = new OrderIdempotencyStore(file, {
+      fileSystem: {
+        open: async (target, flags, mode) => {
+          const handle = await open(target, flags, mode);
+          if (String(target).endsWith(".tmp")) {
+            handle.writeFile = async () => { throw new Error("primary temp write failure"); };
+            handle.close = async () => { throw new Error("secondary temp close failure"); };
+          }
+          return handle;
+        },
+        unlink,
+      },
+    });
+
+    await expect(store.reserve(request)).rejects.toThrow("primary temp write failure");
+    expect((await readdir(path.dirname(file))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
   it("tightens existing store directory and data file permissions", async () => {

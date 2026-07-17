@@ -41,6 +41,8 @@ describe('ToolHandlers', () => {
       getPositions: vi.fn().mockResolvedValue([]),
       getMarketData: vi.fn().mockResolvedValue({ price: 150 }),
       placeOrder: vi.fn().mockResolvedValue({ orderId: '123' }),
+      prepareOrder: vi.fn().mockImplementation(async (order) => ({ accountId: order.accountId, order: { conid: order.conid ?? 265598 } })),
+      submitPreparedOrder: vi.fn().mockResolvedValue({ orderId: '123' }),
       getOrderStatus: vi.fn().mockResolvedValue({ status: 'Filled' }),
       getOrders: vi.fn().mockResolvedValue([]),
       confirmOrder: vi.fn().mockResolvedValue({ confirmed: true }),
@@ -160,12 +162,12 @@ describe('ToolHandlers', () => {
 
     it('should map an allowed limit stock order', async () => {
       const mockResponse = { orderId: '123', status: 'Submitted' };
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(mockResponse);
+      mockIBClient.submitPreparedOrder = vi.fn().mockResolvedValue(mockResponse);
 
       const result = await handlers.placeOrder(validOrder);
 
       expect(result.content).toBeDefined();
-      expect(mockIBClient.placeOrder).toHaveBeenCalledWith(
+      expect(mockIBClient.prepareOrder).toHaveBeenCalledWith(
         expect.objectContaining({
           clientOrderId: 'codex-20260716-001',
           accountId: 'U12345',
@@ -176,6 +178,7 @@ describe('ToolHandlers', () => {
           price: 150.50,
         })
       );
+      expect(mockIBClient.submitPreparedOrder).toHaveBeenCalledTimes(1);
     });
 
     it('should reject account mismatch before calling the IB client', async () => {
@@ -193,7 +196,7 @@ describe('ToolHandlers', () => {
     });
 
     it('should handle order placement errors', async () => {
-      mockIBClient.placeOrder = vi.fn().mockRejectedValue(new Error('Order failed'));
+      mockIBClient.submitPreparedOrder = vi.fn().mockRejectedValue(new Error('Order failed'));
 
       const result = await handlers.placeOrder(validOrder);
 
@@ -202,7 +205,7 @@ describe('ToolHandlers', () => {
 
     it('should replay a completed result after handler restart without submitting again', async () => {
       const response = [{ id: 'order-123', status: 'Submitted' }];
-      mockIBClient.placeOrder = vi.fn().mockResolvedValue(response);
+      mockIBClient.submitPreparedOrder = vi.fn().mockResolvedValue(response);
       const first = await handlers.placeOrder(validOrder);
 
       const restarted = new ToolHandlers({
@@ -213,7 +216,7 @@ describe('ToolHandlers', () => {
 
       expect(JSON.parse(first.content[0].text)).toEqual(response);
       expect(JSON.parse(replay.content[0].text)).toEqual(response);
-      expect(mockIBClient.placeOrder).toHaveBeenCalledTimes(1);
+      expect(mockIBClient.submitPreparedOrder).toHaveBeenCalledTimes(1);
     });
 
     it('should persist transport timeouts as SUBMISSION_UNCERTAIN and never auto-retry', async () => {
@@ -222,7 +225,7 @@ describe('ToolHandlers', () => {
         transportCode: 'UND_ERR_CONNECT_TIMEOUT',
         submissionUncertain: true,
       });
-      mockIBClient.placeOrder = vi.fn().mockRejectedValue(transportError);
+      mockIBClient.submitPreparedOrder = vi.fn().mockRejectedValue(transportError);
 
       const first = await handlers.placeOrder(validOrder);
       const second = await handlers.placeOrder({ ...validOrder });
@@ -235,10 +238,54 @@ describe('ToolHandlers', () => {
         transportCode: 'UND_ERR_CONNECT_TIMEOUT',
       });
       expect(secondPayload).toMatchObject({
-        state: 'uncertain',
-        error: { submissionUncertain: true },
+        code: 'SUBMISSION_UNCERTAIN',
+        submissionUncertain: true,
+        persistedRecord: { state: 'uncertain', error: { submissionUncertain: true } },
       });
-      expect(mockIBClient.placeOrder).toHaveBeenCalledTimes(1);
+      expect(mockIBClient.submitPreparedOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not reserve the client order ID when contract preflight fails', async () => {
+      mockIBClient.prepareOrder = vi.fn().mockRejectedValue(new Error('contract preflight failed'));
+
+      const result = await handlers.placeOrder(validOrder);
+
+      expect(result.content[0].text).toContain('contract preflight failed');
+      expect(await context.orderIdempotencyStore!.get(validOrder.clientOrderId)).toBeUndefined();
+      expect(mockIBClient.submitPreparedOrder).not.toHaveBeenCalled();
+    });
+
+    it('replays a persisted reserved record as explicit SUBMISSION_UNCERTAIN after restart', async () => {
+      await context.orderIdempotencyStore!.reserve(validOrder);
+      const restarted = new ToolHandlers(context);
+
+      const result = await restarted.placeOrder(validOrder);
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload).toMatchObject({ code: 'SUBMISSION_UNCERTAIN', submissionUncertain: true });
+      expect(payload.message).toMatch(/manual|manually|人工|IBKR/i);
+      expect(mockIBClient.prepareOrder).not.toHaveBeenCalled();
+      expect(mockIBClient.submitPreparedOrder).not.toHaveBeenCalled();
+    });
+
+    it('reports SUBMISSION_UNCERTAIN when the POST succeeds but terminal persistence fails', async () => {
+      mockIBClient.prepareOrder = vi.fn().mockResolvedValue({ accountId: validOrder.accountId, order: { conid: 265598 } });
+      mockIBClient.submitPreparedOrder = vi.fn().mockResolvedValue({ orderId: 'accepted-before-crash' });
+      const store = context.orderIdempotencyStore!;
+      store.recordResponse = vi.fn().mockRejectedValue(new Error('disk failed after POST'));
+
+      const first = await handlers.placeOrder(validOrder);
+      const replay = await new ToolHandlers(context).placeOrder(validOrder);
+
+      expect(JSON.parse(first.content[0].text)).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        submissionUncertain: true,
+      });
+      expect(JSON.parse(replay.content[0].text)).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        submissionUncertain: true,
+      });
+      expect(mockIBClient.submitPreparedOrder).toHaveBeenCalledTimes(1);
     });
   });
 
