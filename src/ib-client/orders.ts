@@ -62,6 +62,34 @@ export class OrderCancellationError extends Error {
   }
 }
 
+export class OrderConfirmationError extends Error {
+  readonly status?: number;
+  readonly ibkrBody?: unknown;
+  readonly transportCode?: string;
+  readonly submissionUncertain: true;
+
+  constructor(options: {
+    message: string;
+    status?: number;
+    ibkrBody?: unknown;
+    transportCode?: string;
+    submissionUncertain: true;
+    cause?: unknown;
+  }) {
+    super(options.message, { cause: options.cause });
+    this.name = "OrderConfirmationError";
+    this.status = options.status;
+    Object.defineProperty(this, "ibkrBody", {
+      value: options.ibkrBody,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+    this.transportCode = options.transportCode;
+    this.submissionUncertain = true;
+  }
+}
+
 export interface PreparedOrder {
   accountId: string;
   order: OrderPayload;
@@ -298,18 +326,26 @@ export async function placeOrder(client: IBClientRequester, orderRequest: OrderR
 
 export async function confirmOrder(client: IBClientRequester, replyId: string, messageIds: string[]): Promise<unknown> {
   try {
-    Logger.log(`Confirming order with reply ID ${replyId} and message IDs:`, messageIds);
     const response = await client.request("POST", `/iserver/reply/${replyId}`, {
       body: { confirmed: true, messageIds },
     });
-    Logger.log("Order confirmation response:", response.data);
     return response.data;
   } catch (error: unknown) {
-    Logger.error("Failed to confirm order:", error);
-    if (isAuthenticationError(error)) {
-      throw new AuthenticationError("Authentication required to confirm orders. Please authenticate with Interactive Brokers first.");
+    if (error instanceof HttpError) {
+      throw new OrderConfirmationError({
+        message: `Order confirmation outcome is uncertain after HTTP status ${error.response.status}`,
+        status: error.response.status,
+        ibkrBody: error.response.data,
+        submissionUncertain: true,
+        cause: error,
+      });
     }
-    throw new Error("Failed to confirm order: " + (error instanceof Error ? error.message : String(error)));
+    throw new OrderConfirmationError({
+      message: "Order confirmation outcome is uncertain because the transport failed before a response was received",
+      transportCode: transportCode(error),
+      submissionUncertain: true,
+      cause: error,
+    });
   }
 }
 

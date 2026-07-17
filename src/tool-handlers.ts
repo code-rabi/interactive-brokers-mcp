@@ -910,6 +910,7 @@ export class ToolHandlers {
       const reservation = await this.orderIdempotencyStore.reserveConfirmation(
         this.orderPolicy.getAllowedAccountId(),
         input.replyId,
+        input.messageIds,
       );
       if (!reservation.owner) {
         return this.jsonResult({
@@ -922,7 +923,10 @@ export class ToolHandlers {
 
       let result: unknown;
       try {
-        result = await this.context.ibClient.confirmOrder(input.replyId, input.messageIds);
+        result = await this.context.ibClient.confirmOrder(
+          input.replyId,
+          reservation.authoritativeMessageIds,
+        );
       } catch (error) {
         const candidate = error && typeof error === "object"
           ? error as Record<string, unknown>

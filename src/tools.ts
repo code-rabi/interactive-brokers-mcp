@@ -136,7 +136,7 @@ export function registerTools(
   if (writeEnabled) {
     registerTool(
       "confirm_order",
-      "Manually confirm an order that requires confirmation. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\", \"messageIds\": [\"o10151\", \"o10153\"] }`.",
+      "Manually confirm a persisted IBKR warning for the allowlisted account. messageIds are derived from durable broker evidence; an optional caller echo must match that set. Usage: `{ \"replyId\": \"742a95a7-55f6-4d67-861b-2fd3e2b61e3c\" }`.",
       ConfirmOrderZodShape,
       async (args) => await handlers.confirmOrder(args),
     );

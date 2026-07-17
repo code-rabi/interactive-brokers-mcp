@@ -23,6 +23,7 @@ import {
   getOrderStatus,
   getOrders,
   OrderSubmissionError,
+  OrderConfirmationError,
   OrderCancellationError,
   type PreparedOrder,
 } from "./ib-client/orders.js";
@@ -41,7 +42,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TICKLER_COOKIE_ENV = "IB_TICKLER_COOKIE_HEADER";
 
-export { SymbolNotFoundError, InvalidOrderContractError, OrderSubmissionError, OrderCancellationError };
+export { SymbolNotFoundError, InvalidOrderContractError, OrderSubmissionError, OrderConfirmationError, OrderCancellationError };
 
 // ---------------------------------------------------------------------------
 // Client
@@ -91,7 +92,9 @@ export class IBClient {
       && /^\/iserver\/account\/[^/]+\/orders$/.test(urlPath);
     const isOrderCancellation = method.toUpperCase() === "DELETE"
       && /^\/iserver\/account\/[^/]+\/order\/[^/]+$/.test(urlPath);
-    const isOrderMutation = isOrderSubmission || isOrderCancellation;
+    const isOrderConfirmation = method.toUpperCase() === "POST"
+      && /^\/iserver\/reply\/[^/]+$/.test(urlPath);
+    const isOrderMutation = isOrderSubmission || isOrderCancellation || isOrderConfirmation;
     Logger.log(`[REQUEST-${requestId}] ${method} ${urlPath}`, {
       timeout: options?.timeout ?? 30000,
       headers: options?.headers,

@@ -393,7 +393,7 @@ describe('ToolHandlers', () => {
     }
 
     it('confirms an allowlisted persisted reply after restart and persists the next reply', async () => {
-      await persistWarning([{ id: 'reply-123', message: ['warning'] }]);
+      await persistWarning([{ id: 'reply-123', message: ['warning'], messageIds: ['msg1', 'msg2'] }]);
       const mockResponse = [{ id: 'reply-456', message: ['next warning'] }];
       mockIBClient.confirmOrder = vi.fn().mockResolvedValue(mockResponse);
       const restarted = new ToolHandlers({
@@ -412,6 +412,57 @@ describe('ToolHandlers', () => {
         .toMatchObject([{ replyId: 'reply-123', state: 'completed', response: mockResponse }]);
     });
 
+    it('accepts reordered-equivalent messageIds but sends the persisted order', async () => {
+      await persistWarning([{ id: 'reply-reordered', message: ['warning'], messageIds: ['o2', 'o1'] }]);
+
+      await handlers.confirmOrder({ replyId: 'reply-reordered', messageIds: ['o1', 'o2'] });
+
+      expect(mockIBClient.confirmOrder).toHaveBeenCalledWith('reply-reordered', ['o2', 'o1']);
+    });
+
+    it('fails closed when caller messageIds do not equal persisted warning evidence', async () => {
+      await persistWarning([{ id: 'reply-mismatch', message: ['warning'], messageIds: ['o1', 'o2'] }]);
+
+      const result = await handlers.confirmOrder({ replyId: 'reply-mismatch', messageIds: ['o1', 'other'] });
+
+      expect(result.content[0].text).toMatch(/messageIds.*persisted|mismatch/i);
+      expect(mockIBClient.confirmOrder).not.toHaveBeenCalled();
+    });
+
+    it('durably preserves structured confirmation HTTP evidence and does not replay the POST', async () => {
+      await persistWarning([{ id: 'reply-http-error', message: ['warning'], messageIds: ['o1'] }]);
+      const { OrderConfirmationError } = await vi.importActual<typeof import('../src/ib-client.js')>('../src/ib-client.js');
+      mockIBClient.confirmOrder = vi.fn().mockRejectedValue(new OrderConfirmationError({
+        message: 'confirmation failed after HTTP 503',
+        status: 503,
+        ibkrBody: { error: 'gateway timeout', detail: { broker: 'raw' } },
+        transportCode: 'UND_ERR_HEADERS_TIMEOUT',
+        submissionUncertain: true,
+      }));
+
+      const first = await handlers.confirmOrder({ replyId: 'reply-http-error', messageIds: ['o1'] });
+      const restarted = new ToolHandlers({
+        ...context,
+        orderIdempotencyStore: new OrderIdempotencyStore(path.join(orderStoreDir, 'orders.json')),
+      });
+      const replay = await restarted.confirmOrder({ replyId: 'reply-http-error', messageIds: ['o1'] });
+
+      expect(JSON.parse(first.content[0].text)).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        status: 503,
+        brokerResponse: { error: 'gateway timeout', detail: { broker: 'raw' } },
+        transportCode: 'UND_ERR_HEADERS_TIMEOUT',
+      });
+      expect(JSON.parse(replay.content[0].text)).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        confirmationAttempt: {
+          state: 'uncertain',
+          error: { brokerResponse: { error: 'gateway timeout' } },
+        },
+      });
+      expect(mockIBClient.confirmOrder).toHaveBeenCalledTimes(1);
+    });
+
     it('supports multiple confirmation steps across restarts', async () => {
       await persistWarning([{ id: 'reply-1', message: ['warning'] }]);
       mockIBClient.confirmOrder = vi.fn()
@@ -422,7 +473,7 @@ describe('ToolHandlers', () => {
       const second = await new ToolHandlers({
         ...context,
         orderIdempotencyStore: new OrderIdempotencyStore(path.join(orderStoreDir, 'orders.json')),
-      }).confirmOrder({ replyId: 'reply-2', messageIds: [] });
+      }).confirmOrder({ replyId: 'reply-2', messageIds: ['o123'] });
 
       expect(JSON.parse(second.content[0].text)).toMatchObject({ orderId: 'broker-order-1' });
       expect(mockIBClient.confirmOrder).toHaveBeenCalledTimes(2);

@@ -67,4 +67,35 @@ describe("Logger order-error security", () => {
     expect(contents).not.toContain("DO_NOT_LOG");
     expect(contents).not.toContain("DO_NOT_LOG_SUCCESS");
   });
+
+  it("redacts confirmation request, success, and error bodies", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ib-mcp-confirm-logger-"));
+    dirs.push(root);
+    const script = [
+      "const { IBClient } = await import('./src/ib-client.ts');",
+      "let request = 0;",
+      "globalThis.fetch = async () => request++ === 0",
+      "  ? new Response(JSON.stringify({ error: 'CONFIRM_ERROR_BODY_SECRET' }), { status: 400 })",
+      "  : new Response(JSON.stringify({ confirmed: true, secret: 'CONFIRM_SUCCESS_BODY_SECRET' }));",
+      "const client = new IBClient({ host: 'localhost', port: 5000 });",
+      "client.isAuthenticated = true;",
+      "await client.confirmOrder('reply-error', ['MESSAGE_ID_BODY_SECRET']).catch(() => undefined);",
+      "await client.confirmOrder('reply-success', ['MESSAGE_ID_SUCCESS_SECRET']);",
+      "client.destroy();",
+    ].join("\n");
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      cwd: process.cwd(),
+      env: { ...process.env, IB_MCP_LOG_DIR: root, IB_MCP_CONSOLE_LOGGING: "false" },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    expect(await new Promise<number | null>((resolve) => child.once("exit", resolve))).toBe(0);
+    const contents = await readFile(path.join(root, "ib-mcp.log"), "utf8");
+    expect(contents).toContain('"status":400');
+    for (const secret of [
+      "CONFIRM_ERROR_BODY_SECRET",
+      "CONFIRM_SUCCESS_BODY_SECRET",
+      "MESSAGE_ID_BODY_SECRET",
+      "MESSAGE_ID_SUCCESS_SECRET",
+    ]) expect(contents).not.toContain(secret);
+  });
 });

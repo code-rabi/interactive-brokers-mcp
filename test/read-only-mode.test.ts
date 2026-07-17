@@ -219,7 +219,11 @@ describe("confirm_order MCP provenance", () => {
     const ibClient = {
       checkAuthenticationStatus: vi.fn().mockResolvedValue(true),
       prepareOrder: vi.fn().mockResolvedValue({ accountId: "U12345", order: { conid: 265598 } }),
-      submitPreparedOrder: vi.fn().mockResolvedValue([{ id: "reply-calltool-1", message: ["warning"] }]),
+      submitPreparedOrder: vi.fn().mockResolvedValue([{
+        id: "reply-calltool-1",
+        message: ["warning"],
+        messageIds: ["calltool-warning-id"],
+      }]),
       confirmOrder: vi.fn().mockImplementation(async (replyId: string) => (
         replyId === "reply-calltool-1"
           ? [{ id: "reply-calltool-2", message: ["warning 2"] }]
@@ -263,7 +267,7 @@ describe("confirm_order MCP provenance", () => {
         { name: "confirm_order", arguments: { replyId: "unknown", messageIds: [] } },
       ]);
       const [confirmed] = await callWithServer([
-        { name: "confirm_order", arguments: { replyId: "reply-calltool-1", messageIds: [] } },
+        { name: "confirm_order", arguments: { replyId: "reply-calltool-1" } },
       ]);
       const [secondStep] = await callWithServer([
         { name: "confirm_order", arguments: { replyId: "reply-calltool-2", messageIds: [] } },
@@ -271,6 +275,10 @@ describe("confirm_order MCP provenance", () => {
 
       expect(JSON.stringify(unknown.content)).toMatch(/not authorized/i);
       expect(JSON.stringify(confirmed.content)).toContain("reply-calltool-2");
+      expect(ibClient.confirmOrder).toHaveBeenCalledWith(
+        "reply-calltool-1",
+        ["calltool-warning-id"],
+      );
       expect(JSON.stringify(secondStep.content)).toContain("submitted-after-confirm");
 
       const store = new OrderIdempotencyStore(storePath);

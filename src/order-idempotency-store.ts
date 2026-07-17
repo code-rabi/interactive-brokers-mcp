@@ -59,6 +59,7 @@ export interface OrderConfirmationReservation {
   owner: boolean;
   record: OrderIdempotencyRecord;
   attempt: OrderConfirmationAttempt;
+  authoritativeMessageIds: string[];
 }
 
 interface StoreDocument {
@@ -150,8 +151,13 @@ function canonicalize(value: unknown): unknown {
  * intentionally do not walk arbitrary object properties: an `id` buried in a
  * caller-controlled message/details object is not confirmation authority.
  */
-export function extractIbkrReplyIds(response: unknown): string[] {
-  if (Array.isArray(response)) return response.flatMap(extractIbkrReplyIds);
+interface IbkrWarningEvidence {
+  replyId: string;
+  messageIds: string[];
+}
+
+function extractIbkrWarningEvidence(response: unknown): IbkrWarningEvidence[] {
+  if (Array.isArray(response)) return response.flatMap(extractIbkrWarningEvidence);
   if (!response || typeof response !== "object") return [];
   const candidate = response as Record<string, unknown>;
   const hasDocumentedWarning = (
@@ -162,8 +168,15 @@ export function extractIbkrReplyIds(response: unknown): string[] {
     && candidate.messageIds.every((entry) => typeof entry === "string")
   );
   return typeof candidate.id === "string" && candidate.id.length > 0 && hasDocumentedWarning
-    ? [candidate.id]
+    ? [{
+      replyId: candidate.id,
+      messageIds: Array.isArray(candidate.messageIds) ? [...candidate.messageIds] as string[] : [],
+    }]
     : [];
+}
+
+export function extractIbkrReplyIds(response: unknown): string[] {
+  return extractIbkrWarningEvidence(response).map(({ replyId }) => replyId);
 }
 
 function brokerResponseFromEvidence(evidence: unknown): unknown {
@@ -171,22 +184,22 @@ function brokerResponseFromEvidence(evidence: unknown): unknown {
   return (evidence as Record<string, unknown>).brokerResponse;
 }
 
-function replyIdOccurrences(record: OrderIdempotencyRecord, replyId: string): number {
-  let count = record.replyIds
-    ? record.replyIds.filter((id) => id === replyId).length
-    : [record.response, brokerResponseFromEvidence(record.error)].reduce<number>(
-      (total, source) => total + extractIbkrReplyIds(source).filter((id) => id === replyId).length,
-      0,
-    );
+function warningEvidence(record: OrderIdempotencyRecord): IbkrWarningEvidence[] {
+  const evidence = [record.response, brokerResponseFromEvidence(record.error)]
+    .flatMap(extractIbkrWarningEvidence);
   for (const attempt of record.confirmations ?? []) {
-    const ids = attempt.replyIds ?? (
-      attempt.state === "completed"
-        ? extractIbkrReplyIds(attempt.response)
-        : extractIbkrReplyIds(brokerResponseFromEvidence(attempt.error))
-    );
-    count += ids.filter((id) => id === replyId).length;
+    if (attempt.state === "completed") evidence.push(...extractIbkrWarningEvidence(attempt.response));
+    if (attempt.state === "uncertain") {
+      evidence.push(...extractIbkrWarningEvidence(brokerResponseFromEvidence(attempt.error)));
+    }
   }
-  return count;
+  return evidence;
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((entry) => rightSet.has(entry));
 }
 
 export function orderFingerprint(order: OrderRequest): string {
@@ -275,26 +288,35 @@ export class OrderIdempotencyStore {
   async reserveConfirmation(
     accountId: string,
     replyId: string,
+    callerMessageIds?: string[],
   ): Promise<OrderConfirmationReservation> {
     return this.withLock<OrderConfirmationReservation>(async (document) => {
       const matches = Object.values(document.records)
-        .map((record) => ({ record, occurrences: replyIdOccurrences(record, replyId) }))
-        .filter(({ occurrences }) => occurrences > 0);
-      const totalOccurrences = matches.reduce((total, match) => total + match.occurrences, 0);
+        .flatMap((record) => warningEvidence(record)
+          .filter((evidence) => evidence.replyId === replyId)
+          .map((evidence) => ({ record, evidence })));
       if (
         matches.length !== 1
-        || totalOccurrences !== 1
         || matches[0].record.accountId !== accountId
       ) {
         throw new OrderConfirmationAuthorizationError(
           replyId,
-          totalOccurrences > 1 ? "ambiguous" : "not authorized",
+          matches.length > 1 ? "ambiguous" : "not authorized",
         );
       }
 
       const record = matches[0].record;
+      const authoritativeMessageIds = matches[0].evidence.messageIds;
+      if (callerMessageIds && !sameStringSet(callerMessageIds, authoritativeMessageIds)) {
+        throw new OrderConfirmationAuthorizationError(replyId, "messageIds mismatch with persisted warning evidence");
+      }
       const existing = record.confirmations?.find((attempt) => attempt.replyId === replyId);
-      if (existing) return { value: { owner: false, record, attempt: existing }, changed: false };
+      if (existing) {
+        return {
+          value: { owner: false, record, attempt: existing, authoritativeMessageIds },
+          changed: false,
+        };
+      }
 
       const timestamp = new Date().toISOString();
       const attempt: OrderConfirmationAttempt = {
@@ -305,7 +327,7 @@ export class OrderIdempotencyStore {
       };
       record.confirmations = [...(record.confirmations ?? []), attempt];
       record.updatedAt = timestamp;
-      return { value: { owner: true, record, attempt }, changed: true };
+      return { value: { owner: true, record, attempt, authoritativeMessageIds }, changed: true };
     });
   }
 

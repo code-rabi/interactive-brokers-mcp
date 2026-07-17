@@ -60,7 +60,9 @@ export const GetLiveOrdersZodShape = {
 
 export const ConfirmOrderZodShape = {
   replyId: z.string(),
-  messageIds: z.array(z.string())
+  // Retained as an optional compatibility echo. The handler derives the
+  // authoritative value from persisted IBKR warning evidence.
+  messageIds: z.array(z.string()).optional()
 };
 
 export const CancelOrderZodShape = {

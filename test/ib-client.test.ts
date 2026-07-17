@@ -1,6 +1,6 @@
 // test/ib-client.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { IBClient, OrderCancellationError, OrderSubmissionError, SymbolNotFoundError } from '../src/ib-client.js';
+import { IBClient, OrderCancellationError, OrderConfirmationError, OrderSubmissionError, SymbolNotFoundError } from '../src/ib-client.js';
 
 const { mockSpawn, mockFs } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
@@ -921,6 +921,30 @@ describe('IBClient', () => {
         const body = JSON.parse(call![1].body);
         expect(body).toEqual({ confirmed: true, messageIds: ['msg1', 'msg2'] });
         expect(result).toEqual(mockResult);
+      });
+
+      it.each([400, 503])('preserves HTTP %s confirmation evidence as uncertain', async (status) => {
+        const ibkrBody = { error: 'Confirmation failed', detail: { warning: 'raw evidence' } };
+        mockFetch.mockResolvedValueOnce(mockResponse(ibkrBody, status));
+
+        const error = await client.confirmOrder('reply-http', ['o123']).catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(OrderConfirmationError);
+        expect(error).toMatchObject({
+          status,
+          ibkrBody,
+          submissionUncertain: true,
+        });
+        expect(Object.keys(error)).not.toContain('ibkrBody');
+      });
+
+      it('preserves transport failure code as uncertain', async () => {
+        mockFetch.mockRejectedValueOnce(Object.assign(new Error('socket reset'), { code: 'ECONNRESET' }));
+
+        const error = await client.confirmOrder('reply-transport', []).catch((caught) => caught);
+
+        expect(error).toBeInstanceOf(OrderConfirmationError);
+        expect(error).toMatchObject({ transportCode: 'ECONNRESET', submissionUncertain: true });
       });
     });
   });

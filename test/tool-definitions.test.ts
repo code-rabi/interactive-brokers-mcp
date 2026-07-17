@@ -323,9 +323,13 @@ describe('Tool Definitions - Zod Schemas', () => {
   });
 
   describe('ConfirmOrderZodSchema', () => {
-    it('should require replyId and messageIds', () => {
+    it('should require replyId', () => {
       const result = ConfirmOrderZodSchema.safeParse({});
       expect(result.success).toBe(false);
+    });
+
+    it('allows messageIds to be omitted so persisted evidence is authoritative', () => {
+      expect(ConfirmOrderZodSchema.safeParse({ replyId: 'reply-123' }).success).toBe(true);
     });
 
     it('should accept valid confirmation data', () => {

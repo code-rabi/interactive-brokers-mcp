@@ -226,7 +226,9 @@ confirmation attempt and exact broker response is durably appended to the same
 client-order record, allowing multi-step warnings to continue after a restart.
 Unknown, foreign-account, ambiguous, legacy, and already-attempted reply IDs
 fail closed; an uncertain confirmation must be reconciled manually rather than
-repeated automatically.
+repeated automatically. Warning `messageIds` are taken from that same persisted
+broker response. A caller may omit them; when supplied for compatibility, their
+set must match the persisted warning exactly (ordering is ignored).
 
 Every HTTP failure returned while submitting an order is reported as an
 uncertain submission outcome. The server will not automatically retry that
