@@ -239,6 +239,28 @@ describe("OrderIdempotencyStore", () => {
     expect((await readdir(path.dirname(file))).filter((name) => name.endsWith(".owner"))).toEqual([]);
   });
 
+  it("cleans the published owner alias during release when the first unlink fails", async () => {
+    const file = await makeStorePath();
+    let failedPublishedOwnerCleanup = false;
+    const store = new OrderIdempotencyStore(file, {
+      fileSystem: {
+        unlink: async (target) => {
+          if (!failedPublishedOwnerCleanup && String(target).endsWith(".owner")) {
+            failedPublishedOwnerCleanup = true;
+            throw Object.assign(new Error("injected first owner unlink failure"), { code: "EIO" });
+          }
+          await unlink(target);
+        },
+      },
+    });
+
+    expect((await store.reserve(request)).owner).toBe(true);
+
+    expect(failedPublishedOwnerCleanup).toBe(true);
+    expect((await readdir(path.dirname(file))).filter((name) => name.endsWith(".owner"))).toEqual([]);
+    expect((await readdir(path.dirname(file))).filter((name) => name.endsWith(".lock"))).toEqual([]);
+  });
+
   it("cleans a temp file and preserves the write error when close also fails", async () => {
     const file = await makeStorePath();
     const store = new OrderIdempotencyStore(file, {

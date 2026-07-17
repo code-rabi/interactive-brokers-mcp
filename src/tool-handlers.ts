@@ -443,6 +443,32 @@ export class ToolHandlers {
     });
   }
 
+  private persistenceErrorPayload(error: unknown): { name: string; message: string; code?: string } {
+    const candidate = error && typeof error === "object"
+      ? error as { name?: unknown; message?: unknown; code?: unknown }
+      : undefined;
+    return {
+      name: typeof candidate?.name === "string" ? candidate.name : "Error",
+      message: typeof candidate?.message === "string" ? candidate.message : String(error),
+      code: typeof candidate?.code === "string" ? candidate.code : undefined,
+    };
+  }
+
+  private uncertainPersistencePayload(brokerResponse: unknown, persistenceError: unknown) {
+    return {
+      code: "SUBMISSION_UNCERTAIN" as const,
+      message: "IBKR returned a response, but its terminal result could not be persisted. Check IBKR manually before taking any further action.",
+      submissionUncertain: true,
+      brokerResponse,
+      persistenceError: this.persistenceErrorPayload(persistenceError),
+      manualReconciliation: [
+        "Search IBKR live orders and executions for this clientOrderId.",
+        "Use brokerResponse to match the IBKR order or reply ID.",
+        "Do not submit a replacement order automatically.",
+      ],
+    };
+  }
+
   async authenticate(input: AuthenticateInput): Promise<ToolHandlerResult> {
     try {
       // An explicit authenticate call is the caller asserting they have fixed whatever
@@ -748,7 +774,6 @@ export class ToolHandlers {
 
   async placeOrder(input: PlaceOrderInput): Promise<ToolHandlerResult> {
     let order: ReturnType<OrderPolicy["validatePlaceOrder"]> | undefined;
-    let submissionAttempted = false;
     try {
       order = this.orderPolicy.validatePlaceOrder(input);
       const auth = await this.ensureAuth();
@@ -763,33 +788,32 @@ export class ToolHandlers {
       const reservation = await this.orderIdempotencyStore.reserve(order);
       if (!reservation.owner) return this.replayOrderRecord(reservation.record);
 
-      submissionAttempted = true;
-      const result = await this.context.ibClient.submitPreparedOrder(prepared);
-      await this.orderIdempotencyStore.recordResponse(order, result);
-      return this.jsonResult(result);
-    } catch (error) {
-      const payload = this.orderSubmissionErrorPayload(error);
-      if (order && payload) {
+      let result: unknown;
+      try {
+        result = await this.context.ibClient.submitPreparedOrder(prepared);
+      } catch (submissionError) {
+        const payload = this.orderSubmissionErrorPayload(submissionError) ?? {
+          code: "SUBMISSION_UNCERTAIN" as const,
+          message: `Order submission outcome is uncertain: ${submissionError instanceof Error ? submissionError.message : String(submissionError)}`,
+          submissionUncertain: true,
+        };
         if (payload.submissionUncertain) {
-          await this.orderIdempotencyStore.recordUncertain(order, payload);
+          await this.orderIdempotencyStore.recordUncertain(order, payload).catch(() => undefined);
         } else {
-          await this.orderIdempotencyStore.recordResponse(order, payload);
+          await this.orderIdempotencyStore.recordResponse(order, payload).catch(() => undefined);
         }
         return this.jsonResult(payload);
       }
-      if (order && submissionAttempted) {
-        const uncertain = {
-          code: "SUBMISSION_UNCERTAIN" as const,
-          message: `The order POST may have reached IBKR, but its terminal result could not be persisted: ${error instanceof Error ? error.message : String(error)}. Check IBKR manually before taking any further action.`,
-          submissionUncertain: true,
-          manualReconciliation: [
-            "Search IBKR live orders and executions for this clientOrderId.",
-            "Do not submit a replacement order automatically.",
-          ],
-        };
+
+      try {
+        await this.orderIdempotencyStore.recordResponse(order, result);
+      } catch (persistenceError) {
+        const uncertain = this.uncertainPersistencePayload(result, persistenceError);
         await this.orderIdempotencyStore.recordUncertain(order, uncertain).catch(() => undefined);
         return this.jsonResult(uncertain);
       }
+      return this.jsonResult(result);
+    } catch (error) {
       return {
         content: [
           {

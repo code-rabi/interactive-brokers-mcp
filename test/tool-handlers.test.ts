@@ -280,12 +280,63 @@ describe('ToolHandlers', () => {
       expect(JSON.parse(first.content[0].text)).toMatchObject({
         code: 'SUBMISSION_UNCERTAIN',
         submissionUncertain: true,
+        brokerResponse: { orderId: 'accepted-before-crash' },
+        persistenceError: { message: 'disk failed after POST' },
       });
       expect(JSON.parse(replay.content[0].text)).toMatchObject({
         code: 'SUBMISSION_UNCERTAIN',
         submissionUncertain: true,
+        persistedRecord: {
+          error: { brokerResponse: { orderId: 'accepted-before-crash' } },
+        },
       });
       expect(mockIBClient.submitPreparedOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns exact broker response when both terminal and fallback persistence fail', async () => {
+      mockIBClient.submitPreparedOrder = vi.fn().mockResolvedValue({ orderId: 'accepted-before-double-failure' });
+      const store = context.orderIdempotencyStore!;
+      store.recordResponse = vi.fn().mockRejectedValue(new Error('terminal persistence failed'));
+      store.recordUncertain = vi.fn().mockRejectedValue(new Error('fallback persistence failed'));
+
+      const first = await handlers.placeOrder(validOrder);
+      const replay = await new ToolHandlers(context).placeOrder(validOrder);
+
+      expect(JSON.parse(first.content[0].text)).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        submissionUncertain: true,
+        brokerResponse: { orderId: 'accepted-before-double-failure' },
+        persistenceError: { message: 'terminal persistence failed' },
+      });
+      expect(JSON.parse(replay.content[0].text)).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        persistedRecord: { state: 'reserved' },
+      });
+      expect(mockIBClient.submitPreparedOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { submissionUncertain: true, persistenceMethod: 'recordUncertain' as const },
+      { submissionUncertain: false, persistenceMethod: 'recordResponse' as const },
+    ])('does not replace a structured submission response when $persistenceMethod fails', async ({ submissionUncertain, persistenceMethod }) => {
+      const structured = Object.assign(new Error('structured broker outcome'), {
+        name: 'OrderSubmissionError',
+        status: 400,
+        ibkrBody: { errorCode: 201, error: 'Order rejected' },
+        submissionUncertain,
+      });
+      mockIBClient.submitPreparedOrder = vi.fn().mockRejectedValue(structured);
+      context.orderIdempotencyStore![persistenceMethod] = vi.fn().mockRejectedValue(new Error('persistence unavailable'));
+
+      const result = await handlers.placeOrder(validOrder);
+
+      expect(JSON.parse(result.content[0].text)).toMatchObject({
+        code: submissionUncertain ? 'SUBMISSION_UNCERTAIN' : 'ORDER_SUBMISSION_FAILED',
+        message: 'structured broker outcome',
+        status: 400,
+        ibkrBody: { errorCode: 201, error: 'Order rejected' },
+        submissionUncertain,
+      });
     });
   });
 

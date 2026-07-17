@@ -59,6 +59,7 @@ export interface OrderIdempotencyStoreOptions {
 interface LockOwnership {
   inode: number;
   metadata: string;
+  ownerPath: string;
 }
 
 const defaultFileSystem: OrderStoreFileSystem = {
@@ -235,7 +236,7 @@ export class OrderIdempotencyStore {
           // points at a fully written, fsynced owner metadata file.
           await this.fileSystem.link(ownerPath, this.lockPath);
           await this.fileSystem.unlink(ownerPath).catch(() => undefined);
-          return { inode: ownerInode, metadata };
+          return { inode: ownerInode, metadata, ownerPath };
         } catch (error) {
           await this.fileSystem.unlink(ownerPath).catch(() => undefined);
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -299,7 +300,38 @@ export class OrderIdempotencyStore {
   }
 
   private async releaseLock(lock: LockOwnership): Promise<void> {
-    await this.unlinkIfUnchanged(lock.inode, lock.metadata);
+    let releaseError: unknown;
+    try {
+      await this.unlinkIfUnchanged(lock.inode, lock.metadata);
+    } catch (error) {
+      releaseError = error;
+    } finally {
+      try {
+        await this.unlinkAliasIfOwned(lock.ownerPath, lock.inode, lock.metadata);
+      } catch (aliasError) {
+        if (releaseError === undefined) releaseError = aliasError;
+      }
+    }
+    if (releaseError !== undefined) throw releaseError;
+  }
+
+  private async unlinkAliasIfOwned(
+    aliasPath: string,
+    expectedInode: number,
+    expectedMetadata: string,
+  ): Promise<boolean> {
+    try {
+      const before = await this.fileSystem.stat(aliasPath);
+      if (Number(before.ino) !== expectedInode) return false;
+      const metadata = await this.fileSystem.readFile(aliasPath, "utf8");
+      const after = await this.fileSystem.stat(aliasPath);
+      if (Number(after.ino) !== expectedInode || metadata !== expectedMetadata) return false;
+      await this.fileSystem.unlink(aliasPath);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
   }
 
   private async unlinkIfUnchanged(expectedInode: number, expectedMetadata: string): Promise<boolean> {

@@ -651,7 +651,7 @@ describe('IBClient', () => {
         expect(error).toMatchObject({
           status: 400,
           ibkrBody,
-          submissionUncertain: false,
+          submissionUncertain: true,
         });
       });
 
@@ -718,6 +718,35 @@ describe('IBClient', () => {
 
         const error = await client.placeOrder({
           clientOrderId: `codex-proxy-${status}`,
+          accountId: 'U12345',
+          conid: 265598,
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        }).catch((caught) => caught);
+
+        expect(error).toMatchObject({ status, ibkrBody: proxyBody, submissionUncertain: true });
+      });
+
+      it.each([400, 409])('should never infer a definite rejection from misleading numeric HTTP %s JSON', async (status) => {
+        const proxyBody = {
+          errorCode: 502,
+          error: status === 400
+            ? 'Gateway rejected upstream response'
+            : 'Gateway timeout exceeded while reading rejected upstream response',
+        };
+        mockFetch
+          .mockResolvedValueOnce(mockResponse({
+            conid: 265598,
+            symbol: 'AAPL',
+            secType: 'STK',
+            currency: 'USD',
+          }))
+          .mockResolvedValueOnce(mockResponse(proxyBody, status));
+
+        const error = await client.placeOrder({
+          clientOrderId: `codex-numeric-proxy-${status}`,
           accountId: 'U12345',
           conid: 265598,
           action: 'BUY',

@@ -40,22 +40,6 @@ export class OrderSubmissionError extends Error {
   }
 }
 
-function isExplicitBrokerRejection(status: number, body: unknown): boolean {
-  if (status < 400 || status >= 500 || status === 408 || status === 425 || status === 429) {
-    return false;
-  }
-  const candidates = Array.isArray(body) ? body : [body];
-  return candidates.some((candidate) => {
-    if (!candidate || typeof candidate !== "object") return false;
-    const value = candidate as Record<string, unknown>;
-    const code = value.errorCode ?? value.error_code;
-    const message = value.error ?? value.message;
-    return (typeof code === "number" || (typeof code === "string" && /^\d+$/.test(code)))
-      && typeof message === "string"
-      && /reject|insufficient|not allowed|exceed/i.test(message);
-  });
-}
-
 export interface PreparedOrder {
   accountId: string;
   order: OrderPayload;
@@ -115,14 +99,11 @@ async function submitOrder(
     return response.data;
   } catch (error) {
     if (error instanceof HttpError) {
-      const definiteRejection = isExplicitBrokerRejection(error.response.status, error.response.data);
       throw new OrderSubmissionError({
-        message: definiteRejection
-          ? `IBKR explicitly rejected order submission with HTTP status ${error.response.status}`
-          : `Order submission outcome is uncertain after HTTP status ${error.response.status}`,
+        message: `Order submission outcome is uncertain after HTTP status ${error.response.status}`,
         status: error.response.status,
         ibkrBody: error.response.data,
-        submissionUncertain: !definiteRejection,
+        submissionUncertain: true,
         cause: error,
       });
     }
