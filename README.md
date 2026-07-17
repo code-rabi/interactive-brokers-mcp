@@ -205,6 +205,13 @@ For a complete guide on creating and customizing Flex Queries, see the [IB Flex 
 
 See the [TOTP 2FA Strategy Document](docs/2FA-TOTP-STRATEGY.md) for details on the 2FA and selector-override variables.
 
+Both `--flag value` and `--flag=value` CLI forms are supported. Current
+versions redact usernames, passwords, TOTP secrets, and Flex tokens before
+logging command-line or merged configuration data. Older releases logged raw
+command-line arguments; after upgrading, delete or rotate
+`~/.ib-mcp/ib-mcp.log` (or the log under `IB_MCP_LOG_DIR`) if credentials were
+ever supplied on the command line.
+
 The server is read-only by default. Live write tools are registered only when
 `IB_READ_ONLY_MODE=false` is set explicitly and `IB_ALLOWED_ACCOUNT_ID` names
 the single account permitted for writes. `place_order` accepts limit (`LMT`)
@@ -212,6 +219,14 @@ stock orders only; market, stop, and option orders are rejected. Every order
 must provide a unique `clientOrderId`, a positive finite quantity and price,
 and either a symbol or conid that IBKR resolves unambiguously to a `STK`
 contract.
+
+`confirm_order` accepts only an exact IBKR warning reply ID previously returned
+by this MCP's persisted `place_order` chain for the allowlisted account. Each
+confirmation attempt and exact broker response is durably appended to the same
+client-order record, allowing multi-step warnings to continue after a restart.
+Unknown, foreign-account, ambiguous, legacy, and already-attempted reply IDs
+fail closed; an uncertain confirmation must be reconciled manually rather than
+repeated automatically.
 
 Every HTTP failure returned while submitting an order is reported as an
 uncertain submission outcome. The server will not automatically retry that

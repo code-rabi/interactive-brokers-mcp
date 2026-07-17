@@ -907,15 +907,64 @@ export class ToolHandlers {
       if (!auth.ok) {
         return auth.result;
       }
-      const result = await this.context.ibClient.confirmOrder(input.replyId, input.messageIds);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
+      const reservation = await this.orderIdempotencyStore.reserveConfirmation(
+        this.orderPolicy.getAllowedAccountId(),
+        input.replyId,
+      );
+      if (!reservation.owner) {
+        return this.jsonResult({
+          code: "SUBMISSION_UNCERTAIN",
+          message: `IBKR reply ID ${input.replyId} was already attempted; do not automatically repeat it.`,
+          submissionUncertain: true,
+          confirmationAttempt: reservation.attempt,
+        });
+      }
+
+      let result: unknown;
+      try {
+        result = await this.context.ibClient.confirmOrder(input.replyId, input.messageIds);
+      } catch (error) {
+        const candidate = error && typeof error === "object"
+          ? error as Record<string, unknown>
+          : {};
+        const uncertain = {
+          code: "SUBMISSION_UNCERTAIN" as const,
+          message: `IBKR confirmation outcome is uncertain: ${error instanceof Error ? error.message : String(error)}`,
+          submissionUncertain: true,
+          status: typeof candidate.status === "number" ? candidate.status : undefined,
+          brokerResponse: candidate.ibkrBody,
+          transportCode: typeof candidate.transportCode === "string" ? candidate.transportCode : undefined,
+        };
+        await this.orderIdempotencyStore.recordConfirmationUncertain(
+          reservation.record.clientOrderId,
+          input.replyId,
+          uncertain,
+        ).catch(() => undefined);
+        return this.jsonResult(uncertain);
+      }
+
+      try {
+        await this.orderIdempotencyStore.recordConfirmationResponse(
+          reservation.record.clientOrderId,
+          input.replyId,
+          result,
+        );
+      } catch (persistenceError) {
+        const uncertain = {
+          code: "SUBMISSION_UNCERTAIN" as const,
+          message: "IBKR returned a confirmation response, but it could not be persisted. Reconcile manually and do not repeat the reply POST automatically.",
+          submissionUncertain: true,
+          brokerResponse: result,
+          persistenceError: this.persistenceErrorPayload(persistenceError),
+        };
+        await this.orderIdempotencyStore.recordConfirmationUncertain(
+          reservation.record.clientOrderId,
+          input.replyId,
+          uncertain,
+        ).catch(() => undefined);
+        return this.jsonResult(uncertain);
+      }
+      return this.jsonResult(result);
     } catch (error) {
       return {
         content: [

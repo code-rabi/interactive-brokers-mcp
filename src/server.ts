@@ -5,6 +5,7 @@ import { IBGatewayManager } from "./gateway-manager.js";
 import { config } from "./config.js";
 import { registerTools } from "./tools.js";
 import { Logger } from "./logger.js";
+import { redactConfigForLogging } from "./cli-args.js";
 
 export const configSchema = z.object({
   // Authentication configuration
@@ -57,9 +58,7 @@ export function createIBMCPServer({ config: userConfig }: { config: z.infer<type
   };
 
   // Log the merged config for debugging (but redact sensitive info)
-  const logConfig = { ...mergedConfig };
-  if (logConfig.IB_PASSWORD_AUTH) logConfig.IB_PASSWORD_AUTH = '[REDACTED]';
-  if (logConfig.IB_PASSWORD) logConfig.IB_PASSWORD = '[REDACTED]';
+  const logConfig = redactConfigForLogging({ ...mergedConfig });
   Logger.info(`🔍 Final merged config: ${JSON.stringify(logConfig, null, 2)}`);
 
   // Create IB Client with default port initially - this will be updated once gateway starts
@@ -88,5 +87,4 @@ export function createIBMCPServer({ config: userConfig }: { config: z.infer<type
 
   return server;
 }
-
 

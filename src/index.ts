@@ -6,152 +6,16 @@ import { IBGatewayManager } from "./gateway-manager.js";
 import { config, parseReadOnlyMode } from "./config.js";
 import { registerTools } from "./tools.js";
 import { Logger } from "./logger.js";
+import { parseCliArgs, redactConfigForLogging } from "./cli-args.js";
 
-
-// Parse command line arguments
-function parseArgs(): z.infer<typeof configSchema> {
-  const args: any = {};
-  const argv = process.argv.slice(2);
-
-  // Log raw arguments for debugging
-  Logger.info(`🔍 Raw command line arguments: ${JSON.stringify(argv)}`);
-
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-
-    if (arg.startsWith('--')) {
-      const key = arg.slice(2);
-      const nextArg = argv[i + 1];
-
-      Logger.debug(`🔍 Processing flag: ${key}, nextArg: ${nextArg}`);
-
-      switch (key) {
-        case 'ib-username':
-          args.IB_USERNAME = nextArg;
-          Logger.debug(`🔍 Set IB_USERNAME to: ${nextArg}`);
-          i++;
-          break;
-        case 'ib-password':
-        case 'ib-password-auth':
-          args.IB_PASSWORD_AUTH = nextArg;
-          Logger.debug(`🔍 Set IB_PASSWORD_AUTH to: [REDACTED]`);
-          i++;
-          break;
-        case 'ib-auth-timeout':
-          args.IB_AUTH_TIMEOUT = parseInt(nextArg);
-          Logger.debug(`🔍 Set IB_AUTH_TIMEOUT to: ${nextArg}`);
-          i++;
-          break;
-        case 'ib-auth-wait-seconds':
-          args.IB_AUTH_WAIT_SECONDS = parseInt(nextArg);
-          Logger.debug(`🔍 Set IB_AUTH_WAIT_SECONDS to: ${nextArg}`);
-          i++;
-          break;
-        case 'ib-auth-poll-seconds':
-          args.IB_AUTH_POLL_SECONDS = parseInt(nextArg);
-          Logger.debug(`🔍 Set IB_AUTH_POLL_SECONDS to: ${nextArg}`);
-          i++;
-          break;
-
-        case 'ib-headless-mode':
-          // Support both --ib-headless-mode (boolean flag) and --ib-headless-mode=true/false
-          if (nextArg && !nextArg.startsWith('--')) {
-            args.IB_HEADLESS_MODE = nextArg.toLowerCase() === 'true';
-            Logger.debug(`🔍 Set IB_HEADLESS_MODE to: ${nextArg.toLowerCase() === 'true'} (from arg: ${nextArg})`);
-            i++;
-          } else {
-            args.IB_HEADLESS_MODE = true;
-            Logger.debug(`🔍 Set IB_HEADLESS_MODE to: true (flag only)`);
-          }
-          break;
-        case 'ib-paper-trading':
-          // Support both --ib-paper-trading (boolean flag) and --ib-paper-trading=true/false
-          if (nextArg && !nextArg.startsWith('--')) {
-            args.IB_PAPER_TRADING = nextArg.toLowerCase() === 'true';
-            Logger.debug(`🔍 Set IB_PAPER_TRADING to: ${nextArg.toLowerCase() === 'true'} (from arg: ${nextArg})`);
-            i++;
-          } else {
-            args.IB_PAPER_TRADING = true;
-            Logger.debug(`🔍 Set IB_PAPER_TRADING to: true (flag only)`);
-          }
-          break;
-        case 'ib-read-only-mode':
-          // Support both --ib-read-only-mode (boolean flag) and --ib-read-only-mode=true/false
-          if (nextArg && !nextArg.startsWith('--')) {
-            args.IB_READ_ONLY_MODE = parseReadOnlyMode(nextArg);
-            Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: ${args.IB_READ_ONLY_MODE} (from arg: ${nextArg})`);
-            i++;
-          } else {
-            args.IB_READ_ONLY_MODE = true;
-            Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: true (flag only)`);
-          }
-          break;
-        case 'ib-allowed-account-id':
-          args.IB_ALLOWED_ACCOUNT_ID = nextArg;
-          Logger.debug(`🔍 Set IB_ALLOWED_ACCOUNT_ID to: ${nextArg}`);
-          i++;
-          break;
-
-      }
-    } else if (arg.includes('=')) {
-      const [key, value] = arg.split('=', 2);
-      const cleanKey = key.startsWith('--') ? key.slice(2) : key;
-
-      Logger.debug(`🔍 Processing key=value: ${cleanKey}=${value}`);
-
-      switch (cleanKey) {
-        case 'ib-username':
-          args.IB_USERNAME = value;
-          Logger.debug(`🔍 Set IB_USERNAME to: ${value}`);
-          break;
-        case 'ib-password':
-        case 'ib-password-auth':
-          args.IB_PASSWORD_AUTH = value;
-          Logger.debug(`🔍 Set IB_PASSWORD_AUTH to: [REDACTED]`);
-          break;
-        case 'ib-auth-timeout':
-          args.IB_AUTH_TIMEOUT = parseInt(value);
-          Logger.debug(`🔍 Set IB_AUTH_TIMEOUT to: ${value}`);
-          break;
-        case 'ib-auth-wait-seconds':
-          args.IB_AUTH_WAIT_SECONDS = parseInt(value);
-          Logger.debug(`🔍 Set IB_AUTH_WAIT_SECONDS to: ${value}`);
-          break;
-        case 'ib-auth-poll-seconds':
-          args.IB_AUTH_POLL_SECONDS = parseInt(value);
-          Logger.debug(`🔍 Set IB_AUTH_POLL_SECONDS to: ${value}`);
-          break;
-
-        case 'ib-headless-mode':
-          args.IB_HEADLESS_MODE = value.toLowerCase() === 'true';
-          Logger.debug(`🔍 Set IB_HEADLESS_MODE to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
-          break;
-        case 'ib-paper-trading':
-          args.IB_PAPER_TRADING = value.toLowerCase() === 'true';
-          Logger.debug(`🔍 Set IB_PAPER_TRADING to: ${value.toLowerCase() === 'true'} (from value: ${value})`);
-          break;
-        case 'ib-read-only-mode':
-          args.IB_READ_ONLY_MODE = parseReadOnlyMode(value);
-          Logger.debug(`🔍 Set IB_READ_ONLY_MODE to: ${args.IB_READ_ONLY_MODE} (from value: ${value})`);
-          break;
-        case 'ib-allowed-account-id':
-          args.IB_ALLOWED_ACCOUNT_ID = value;
-          Logger.debug(`🔍 Set IB_ALLOWED_ACCOUNT_ID to: ${value}`);
-          break;
-
-      }
-    }
-  }
-
-  Logger.info(`🔍 Parsed args: ${JSON.stringify(args, null, 2)}`);
-  return args;
-}
 
 // Optional: Define configuration schema for session configuration
 export const configSchema = z.object({
   // Authentication configuration
   IB_USERNAME: z.string().optional(),
   IB_PASSWORD_AUTH: z.string().optional(),
+  IB_TOTP_SECRET: z.string().optional(),
+  IB_FLEX_TOKEN: z.string().optional(),
   IB_AUTH_TIMEOUT: z.number().optional(),
   IB_AUTH_WAIT_SECONDS: z.number().optional(),
   IB_AUTH_POLL_SECONDS: z.number().optional(),
@@ -262,9 +126,7 @@ function IBMCP({ config: userConfig }: { config: z.infer<typeof configSchema> })
   };
 
   // Log the merged config for debugging (but redact sensitive info)
-  const logConfig = { ...mergedConfig };
-  if (logConfig.IB_PASSWORD_AUTH) logConfig.IB_PASSWORD_AUTH = '[REDACTED]';
-  if (logConfig.IB_PASSWORD) logConfig.IB_PASSWORD = '[REDACTED]';
+  const logConfig = redactConfigForLogging({ ...mergedConfig });
   Logger.info(`🔍 Final merged config: ${JSON.stringify(logConfig, null, 2)}`);
 
   // Create IB Client with default port initially - this will be updated once gateway starts
@@ -315,7 +177,7 @@ if (isMainModule) {
 
   // Parse command line arguments and merge with environment variables
   // Priority: args > env > defaults
-  const argsConfig = parseArgs();
+  const argsConfig = parseCliArgs() as z.infer<typeof configSchema>;
   const envConfig = {
     IB_USERNAME: process.env.IB_USERNAME,
     IB_PASSWORD_AUTH: process.env.IB_PASSWORD_AUTH || process.env.IB_PASSWORD,
@@ -329,8 +191,7 @@ if (isMainModule) {
   };
 
   // Log environment config for debugging
-  const logEnvConfig = { ...envConfig };
-  if (logEnvConfig.IB_PASSWORD_AUTH) logEnvConfig.IB_PASSWORD_AUTH = '[REDACTED]';
+  const logEnvConfig = redactConfigForLogging({ ...envConfig });
   Logger.info(`🔍 Environment config: ${JSON.stringify(logEnvConfig, null, 2)}`);
 
   // Merge configs with priority: args > env > defaults
@@ -340,8 +201,7 @@ if (isMainModule) {
   };
 
   // Log final config before cleanup
-  const logFinalConfig = { ...finalConfig };
-  if (logFinalConfig.IB_PASSWORD_AUTH) logFinalConfig.IB_PASSWORD_AUTH = '[REDACTED]';
+  const logFinalConfig = redactConfigForLogging({ ...finalConfig });
   Logger.info(`🔍 Final config before cleanup: ${JSON.stringify(logFinalConfig, null, 2)}`);
 
   // Remove undefined values
@@ -352,8 +212,7 @@ if (isMainModule) {
   });
 
   // Log final config after cleanup
-  const logFinalConfigAfter = { ...finalConfig };
-  if (logFinalConfigAfter.IB_PASSWORD_AUTH) logFinalConfigAfter.IB_PASSWORD_AUTH = '[REDACTED]';
+  const logFinalConfigAfter = redactConfigForLogging({ ...finalConfig });
   Logger.info(`🔍 Final config after cleanup: ${JSON.stringify(logFinalConfigAfter, null, 2)}`);
 
   const stdioTransport = new StdioServerTransport();

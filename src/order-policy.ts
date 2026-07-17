@@ -31,6 +31,11 @@ export class OrderPolicy {
     }
   }
 
+  getAllowedAccountId(): string {
+    this.assertWriteEnabled();
+    return this.allowedAccountId!;
+  }
+
   validatePlaceOrder(input: unknown): PlaceOrderInput {
     const order = PlaceOrderZodSchema.parse(input);
     if (!order.symbol && order.conid === undefined) {

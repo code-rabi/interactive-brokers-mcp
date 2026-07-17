@@ -5,6 +5,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerTools } from "../src/tools.js";
 import { IBClient } from "../src/ib-client.js";
 import { IBGatewayManager } from "../src/gateway-manager.js";
+import { OrderIdempotencyStore } from "../src/order-idempotency-store.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 vi.mock("../src/ib-client.js");
 vi.mock("../src/gateway-manager.js");
@@ -204,6 +208,114 @@ describe("cancel_order MCP entrypoint validation", () => {
     } finally {
       await client.close();
       await server.close();
+    }
+  });
+});
+
+describe("confirm_order MCP provenance", () => {
+  it("confirms only a reply persisted by this MCP and survives a server restart", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ib-mcp-calltool-confirm-"));
+    const storePath = path.join(dir, "orders.json");
+    const ibClient = {
+      checkAuthenticationStatus: vi.fn().mockResolvedValue(true),
+      prepareOrder: vi.fn().mockResolvedValue({ accountId: "U12345", order: { conid: 265598 } }),
+      submitPreparedOrder: vi.fn().mockResolvedValue([{ id: "reply-calltool-1", message: ["warning"] }]),
+      confirmOrder: vi.fn().mockImplementation(async (replyId: string) => (
+        replyId === "reply-calltool-1"
+          ? [{ id: "reply-calltool-2", message: ["warning 2"] }]
+          : { orderId: "submitted-after-confirm", status: "Submitted" }
+      )),
+    } as unknown as IBClient;
+
+    const callWithServer = async (calls: Array<{ name: string; arguments: Record<string, unknown> }>) => {
+      const server = new McpServer({ name: "test-server", version: "1.0.0" });
+      registerTools(server, ibClient, undefined, {
+        IB_READ_ONLY_MODE: false,
+        IB_ALLOWED_ACCOUNT_ID: "U12345",
+        IB_ORDER_IDEMPOTENCY_STORE_PATH: storePath,
+      });
+      const client = new Client({ name: "test-client", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        return await Promise.all(calls.map((call) => client.callTool(call)));
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    };
+
+    try {
+      await callWithServer([{
+        name: "place_order",
+        arguments: {
+          clientOrderId: "calltool-confirm-chain",
+          accountId: "U12345",
+          symbol: "AAPL",
+          action: "BUY",
+          orderType: "LMT",
+          quantity: 1,
+          price: 150,
+        },
+      }]);
+      const [unknown] = await callWithServer([
+        { name: "confirm_order", arguments: { replyId: "unknown", messageIds: [] } },
+      ]);
+      const [confirmed] = await callWithServer([
+        { name: "confirm_order", arguments: { replyId: "reply-calltool-1", messageIds: [] } },
+      ]);
+      const [secondStep] = await callWithServer([
+        { name: "confirm_order", arguments: { replyId: "reply-calltool-2", messageIds: [] } },
+      ]);
+
+      expect(JSON.stringify(unknown.content)).toMatch(/not authorized/i);
+      expect(JSON.stringify(confirmed.content)).toContain("reply-calltool-2");
+      expect(JSON.stringify(secondStep.content)).toContain("submitted-after-confirm");
+
+      const store = new OrderIdempotencyStore(storePath);
+      const baseOrder = {
+        symbol: "AAPL",
+        action: "BUY" as const,
+        orderType: "LMT" as const,
+        quantity: 1,
+        price: 150,
+      };
+      const foreign = { ...baseOrder, clientOrderId: "foreign", accountId: "U99999" };
+      await store.reserve(foreign);
+      await store.recordResponse(foreign, [{ id: "foreign-reply", message: ["warning"] }]);
+      const [foreignResult] = await callWithServer([
+        { name: "confirm_order", arguments: { replyId: "foreign-reply", messageIds: [] } },
+      ]);
+      expect(JSON.stringify(foreignResult.content)).toMatch(/not authorized/i);
+
+      for (const clientOrderId of ["duplicate-a", "duplicate-b"]) {
+        const order = { ...baseOrder, clientOrderId, accountId: "U12345" };
+        await store.reserve(order);
+        await store.recordResponse(order, [{ id: "duplicate-reply", message: ["warning"] }]);
+      }
+      const [duplicate] = await callWithServer([
+        { name: "confirm_order", arguments: { replyId: "duplicate-reply", messageIds: [] } },
+      ]);
+      expect(JSON.stringify(duplicate.content)).toMatch(/ambiguous/i);
+
+      const persistenceOrder = { ...baseOrder, clientOrderId: "persistence", accountId: "U12345" };
+      await store.reserve(persistenceOrder);
+      await store.recordResponse(persistenceOrder, [{ id: "persistence-reply", message: ["warning"] }]);
+      const persistenceSpy = vi.spyOn(OrderIdempotencyStore.prototype, "recordConfirmationResponse")
+        .mockRejectedValueOnce(new Error("injected persistence failure"));
+      const [persistenceResult] = await callWithServer([
+        { name: "confirm_order", arguments: { replyId: "persistence-reply", messageIds: [] } },
+      ]);
+      persistenceSpy.mockRestore();
+      expect(JSON.parse((persistenceResult.content[0] as { text: string }).text)).toMatchObject({
+        code: "SUBMISSION_UNCERTAIN",
+        submissionUncertain: true,
+        brokerResponse: { orderId: "submitted-after-confirm" },
+      });
+      expect(ibClient.confirmOrder).toHaveBeenCalledTimes(3);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

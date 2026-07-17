@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  OrderConfirmationAuthorizationError,
   OrderIdempotencyConflictError,
   OrderIdempotencyStore,
 } from "../src/order-idempotency-store.js";
@@ -46,10 +47,108 @@ describe("OrderIdempotencyStore", () => {
       owner: false,
       record: {
         clientOrderId: request.clientOrderId,
+        accountId: "U12345",
         state: "completed",
         response: [{ id: "order-123", status: "Submitted" }],
       },
     });
+  });
+
+  it("authorizes exactly one allowlisted broker reply and persists a multi-step chain", async () => {
+    const file = await makeStorePath();
+    const first = new OrderIdempotencyStore(file);
+    await first.reserve(request);
+    await first.recordResponse(request, [{ id: "reply-1", message: ["warning"] }]);
+
+    const restarted = new OrderIdempotencyStore(file);
+    const firstStep = await restarted.reserveConfirmation("U12345", "reply-1");
+    expect(firstStep).toMatchObject({ owner: true, record: { accountId: "U12345" } });
+    await restarted.recordConfirmationResponse(
+      request.clientOrderId,
+      "reply-1",
+      [{ id: "reply-2", message: ["second warning"] }],
+    );
+
+    const secondRestart = new OrderIdempotencyStore(file);
+    expect(await secondRestart.reserveConfirmation("U12345", "reply-2"))
+      .toMatchObject({ owner: true });
+    const persisted = await secondRestart.get(request.clientOrderId);
+    expect(persisted?.confirmations).toMatchObject([
+      { replyId: "reply-1", state: "completed", replyIds: ["reply-2"], response: [{ id: "reply-2" }] },
+      { replyId: "reply-2", state: "reserved" },
+    ]);
+  });
+
+  it("rejects a reply id duplicated across allowed and foreign account records", async () => {
+    const store = new OrderIdempotencyStore(await makeStorePath());
+    await store.reserve(request);
+    await store.recordResponse(request, [{ id: "cross-account-duplicate", message: ["warning"] }]);
+    const foreign = { ...request, clientOrderId: "foreign-order", accountId: "U99999" };
+    await store.reserve(foreign);
+    await store.recordResponse(foreign, [{ id: "cross-account-duplicate", messageIds: ["o123"] }]);
+
+    await expect(store.reserveConfirmation("U12345", "cross-account-duplicate"))
+      .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+  });
+
+  it("fails closed for unknown, foreign-account, legacy, and ambiguous reply ids", async () => {
+    const file = await makeStorePath();
+    const store = new OrderIdempotencyStore(file);
+    await store.reserve(request);
+    await store.recordResponse(request, [
+      { id: "reply-1", message: ["warning"] },
+      { id: "duplicate", message: ["warning"] },
+      { id: "duplicate", messageIds: ["o123"] },
+    ]);
+
+    await expect(store.reserveConfirmation("U12345", "missing"))
+      .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+    await expect(store.reserveConfirmation("U99999", "reply-1"))
+      .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+    await expect(store.reserveConfirmation("U12345", "duplicate"))
+      .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+
+    const document = JSON.parse(await readFile(file, "utf8"));
+    delete document.records[request.clientOrderId].accountId;
+    await writeFile(file, `${JSON.stringify(document)}\n`);
+    await expect(new OrderIdempotencyStore(file).reserveConfirmation("U12345", "reply-1"))
+      .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+  });
+
+  it("does not authorize fuzzy or arbitrary nested id fields", async () => {
+    const store = new OrderIdempotencyStore(await makeStorePath());
+    await store.reserve(request);
+    await store.recordResponse(request, {
+      message: "reply-fuzzy",
+      details: { id: "nested-untrusted" },
+      response: [{ id: "nested-wrapper-untrusted" }],
+    });
+
+    for (const replyId of ["reply-fuzzy", "nested-untrusted", "nested-wrapper-untrusted"]) {
+      await expect(store.reserveConfirmation("U12345", replyId))
+        .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+    }
+  });
+
+  it("does not mistake an ordinary successful order id for a warning reply id", async () => {
+    const store = new OrderIdempotencyStore(await makeStorePath());
+    await store.reserve(request);
+    await store.recordResponse(request, [{ id: "broker-order-id", status: "Submitted" }]);
+
+    await expect(store.reserveConfirmation("U12345", "broker-order-id"))
+      .rejects.toBeInstanceOf(OrderConfirmationAuthorizationError);
+  });
+
+  it("authorizes an exact warning id preserved in uncertain brokerResponse evidence", async () => {
+    const store = new OrderIdempotencyStore(await makeStorePath());
+    await store.reserve(request);
+    await store.recordUncertain(request, {
+      code: "SUBMISSION_UNCERTAIN",
+      brokerResponse: [{ id: "uncertain-reply", messageIds: ["o123"] }],
+    });
+
+    expect(await store.reserveConfirmation("U12345", "uncertain-reply"))
+      .toMatchObject({ owner: true });
   });
 
   it("rejects conflicting reuse of a client order ID", async () => {
@@ -153,6 +252,21 @@ describe("OrderIdempotencyStore", () => {
     const reservation = await store.reserve(request);
 
     expect(reservation.owner).toBe(true);
+  });
+
+  it("recovers a stale lock when a live PID has a different process-start identity", async () => {
+    const file = await makeStorePath();
+    await writeFile(`${file}.lock`, JSON.stringify({
+      pid: process.pid,
+      token: "stale-owner",
+      identity: "old-process-start",
+    }), { mode: 0o600 });
+    const store = new OrderIdempotencyStore(file, {
+      lockInitializationGraceMs: 0,
+      processIdentity: () => "current-process-start",
+    });
+
+    expect((await store.reserve(request)).owner).toBe(true);
   });
 
   it("fsyncs the parent directory after rename", async () => {

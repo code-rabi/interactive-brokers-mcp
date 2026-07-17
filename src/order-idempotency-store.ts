@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
   mkdir as fsMkdir,
   chmod as fsChmod,
@@ -15,13 +17,28 @@ import path from "node:path";
 import type { OrderRequest } from "./ib-client/types.js";
 
 export type OrderIdempotencyState = "reserved" | "completed" | "uncertain";
+export type OrderConfirmationState = "reserved" | "completed" | "uncertain";
+
+export interface OrderConfirmationAttempt {
+  replyId: string;
+  state: OrderConfirmationState;
+  replyIds?: string[];
+  response?: unknown;
+  error?: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface OrderIdempotencyRecord {
   clientOrderId: string;
+  /** Missing on legacy records. Confirmation authorization must fail closed. */
+  accountId?: string;
   fingerprint: string;
   state: OrderIdempotencyState;
   response?: unknown;
   error?: unknown;
+  replyIds?: string[];
+  confirmations?: OrderConfirmationAttempt[];
   createdAt: string;
   updatedAt: string;
 }
@@ -29,6 +46,19 @@ export interface OrderIdempotencyRecord {
 export interface OrderReservation {
   owner: boolean;
   record: OrderIdempotencyRecord;
+}
+
+export class OrderConfirmationAuthorizationError extends Error {
+  constructor(replyId: string, reason = "not authorized") {
+    super(`IBKR reply ID ${replyId} is ${reason} for the allowlisted account`);
+    this.name = "OrderConfirmationAuthorizationError";
+  }
+}
+
+export interface OrderConfirmationReservation {
+  owner: boolean;
+  record: OrderIdempotencyRecord;
+  attempt: OrderConfirmationAttempt;
 }
 
 interface StoreDocument {
@@ -54,6 +84,7 @@ interface OrderStoreFileSystem {
 export interface OrderIdempotencyStoreOptions {
   fileSystem?: Partial<OrderStoreFileSystem>;
   lockInitializationGraceMs?: number;
+  processIdentity?: (pid: number) => string | undefined;
 }
 
 interface LockOwnership {
@@ -73,6 +104,27 @@ const defaultFileSystem: OrderStoreFileSystem = {
   unlink: fsUnlink,
 };
 
+function defaultProcessIdentity(pid: number): string | undefined {
+  try {
+    if (process.platform === "linux") {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fieldsAfterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      const startTicks = fieldsAfterCommand[19];
+      return startTicks ? `linux:${startTicks}` : undefined;
+    }
+    if (process.platform === "darwin") {
+      const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      return started ? `darwin:${started}` : undefined;
+    }
+  } catch {
+    // Unsupported/vanished processes remain fail-closed in recovery.
+  }
+  return undefined;
+}
+
 export class OrderIdempotencyConflictError extends Error {
   constructor(clientOrderId: string) {
     super(`Client order ID ${clientOrderId} was already used for a different order`);
@@ -91,6 +143,50 @@ function canonicalize(value: unknown): unknown {
     );
   }
   return value;
+}
+
+/**
+ * Extract IBKR warning reply IDs only from response objects and arrays. We
+ * intentionally do not walk arbitrary object properties: an `id` buried in a
+ * caller-controlled message/details object is not confirmation authority.
+ */
+export function extractIbkrReplyIds(response: unknown): string[] {
+  if (Array.isArray(response)) return response.flatMap(extractIbkrReplyIds);
+  if (!response || typeof response !== "object") return [];
+  const candidate = response as Record<string, unknown>;
+  const hasDocumentedWarning = (
+    Array.isArray(candidate.message)
+    && candidate.message.every((entry) => typeof entry === "string")
+  ) || (
+    Array.isArray(candidate.messageIds)
+    && candidate.messageIds.every((entry) => typeof entry === "string")
+  );
+  return typeof candidate.id === "string" && candidate.id.length > 0 && hasDocumentedWarning
+    ? [candidate.id]
+    : [];
+}
+
+function brokerResponseFromEvidence(evidence: unknown): unknown {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return undefined;
+  return (evidence as Record<string, unknown>).brokerResponse;
+}
+
+function replyIdOccurrences(record: OrderIdempotencyRecord, replyId: string): number {
+  let count = record.replyIds
+    ? record.replyIds.filter((id) => id === replyId).length
+    : [record.response, brokerResponseFromEvidence(record.error)].reduce<number>(
+      (total, source) => total + extractIbkrReplyIds(source).filter((id) => id === replyId).length,
+      0,
+    );
+  for (const attempt of record.confirmations ?? []) {
+    const ids = attempt.replyIds ?? (
+      attempt.state === "completed"
+        ? extractIbkrReplyIds(attempt.response)
+        : extractIbkrReplyIds(brokerResponseFromEvidence(attempt.error))
+    );
+    count += ids.filter((id) => id === replyId).length;
+  }
+  return count;
 }
 
 export function orderFingerprint(order: OrderRequest): string {
@@ -113,6 +209,7 @@ export class OrderIdempotencyStore {
   private readonly lockPath: string;
   private readonly fileSystem: OrderStoreFileSystem;
   private readonly lockInitializationGraceMs: number;
+  private readonly processIdentity: (pid: number) => string | undefined;
 
   constructor(
     filePath = defaultOrderIdempotencyStorePath(),
@@ -123,6 +220,7 @@ export class OrderIdempotencyStore {
     this.fileSystem = { ...defaultFileSystem, ...options.fileSystem };
     this.lockInitializationGraceMs = options.lockInitializationGraceMs
       ?? LOCK_INITIALIZATION_GRACE_MS;
+    this.processIdentity = options.processIdentity ?? defaultProcessIdentity;
   }
 
   async reserve(order: OrderRequest): Promise<OrderReservation> {
@@ -139,6 +237,7 @@ export class OrderIdempotencyStore {
       const timestamp = new Date().toISOString();
       const record: OrderIdempotencyRecord = {
         clientOrderId: order.clientOrderId,
+        accountId: order.accountId,
         fingerprint,
         state: "reserved",
         createdAt: timestamp,
@@ -150,11 +249,14 @@ export class OrderIdempotencyStore {
   }
 
   async recordResponse(order: OrderRequest, response: unknown): Promise<OrderIdempotencyRecord> {
-    return this.update(order, "completed", { response });
+    return this.update(order, "completed", { response, replyIds: extractIbkrReplyIds(response) });
   }
 
   async recordUncertain(order: OrderRequest, error: unknown): Promise<OrderIdempotencyRecord> {
-    return this.update(order, "uncertain", { error });
+    return this.update(order, "uncertain", {
+      error,
+      replyIds: extractIbkrReplyIds(brokerResponseFromEvidence(error)),
+    });
   }
 
   async get(clientOrderId: string): Promise<OrderIdempotencyRecord | undefined> {
@@ -170,10 +272,93 @@ export class OrderIdempotencyStore {
     return existing;
   }
 
+  async reserveConfirmation(
+    accountId: string,
+    replyId: string,
+  ): Promise<OrderConfirmationReservation> {
+    return this.withLock<OrderConfirmationReservation>(async (document) => {
+      const matches = Object.values(document.records)
+        .map((record) => ({ record, occurrences: replyIdOccurrences(record, replyId) }))
+        .filter(({ occurrences }) => occurrences > 0);
+      const totalOccurrences = matches.reduce((total, match) => total + match.occurrences, 0);
+      if (
+        matches.length !== 1
+        || totalOccurrences !== 1
+        || matches[0].record.accountId !== accountId
+      ) {
+        throw new OrderConfirmationAuthorizationError(
+          replyId,
+          totalOccurrences > 1 ? "ambiguous" : "not authorized",
+        );
+      }
+
+      const record = matches[0].record;
+      const existing = record.confirmations?.find((attempt) => attempt.replyId === replyId);
+      if (existing) return { value: { owner: false, record, attempt: existing }, changed: false };
+
+      const timestamp = new Date().toISOString();
+      const attempt: OrderConfirmationAttempt = {
+        replyId,
+        state: "reserved",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      record.confirmations = [...(record.confirmations ?? []), attempt];
+      record.updatedAt = timestamp;
+      return { value: { owner: true, record, attempt }, changed: true };
+    });
+  }
+
+  async recordConfirmationResponse(
+    clientOrderId: string,
+    replyId: string,
+    response: unknown,
+  ): Promise<OrderIdempotencyRecord> {
+    return this.updateConfirmation(clientOrderId, replyId, "completed", {
+      response,
+      replyIds: extractIbkrReplyIds(response),
+    });
+  }
+
+  async recordConfirmationUncertain(
+    clientOrderId: string,
+    replyId: string,
+    error: unknown,
+  ): Promise<OrderIdempotencyRecord> {
+    return this.updateConfirmation(clientOrderId, replyId, "uncertain", {
+      error,
+      replyIds: extractIbkrReplyIds(brokerResponseFromEvidence(error)),
+    });
+  }
+
+  private async updateConfirmation(
+    clientOrderId: string,
+    replyId: string,
+    state: "completed" | "uncertain",
+    payload: { response?: unknown; error?: unknown; replyIds?: string[] },
+  ): Promise<OrderIdempotencyRecord> {
+    return this.withLock(async (document) => {
+      const record = document.records[clientOrderId];
+      const index = record?.confirmations?.findIndex((attempt) => attempt.replyId === replyId) ?? -1;
+      if (!record || index < 0 || record.confirmations![index].state !== "reserved") {
+        throw new OrderConfirmationAuthorizationError(replyId, "not in a reserved confirmation state");
+      }
+      const timestamp = new Date().toISOString();
+      record.confirmations![index] = {
+        ...record.confirmations![index],
+        state,
+        ...payload,
+        updatedAt: timestamp,
+      };
+      record.updatedAt = timestamp;
+      return { value: record, changed: true };
+    });
+  }
+
   private async update(
     order: OrderRequest,
     state: "completed" | "uncertain",
-    payload: { response?: unknown; error?: unknown },
+    payload: { response?: unknown; error?: unknown; replyIds?: string[] },
   ): Promise<OrderIdempotencyRecord> {
     const fingerprint = orderFingerprint(order);
     return this.withLock(async (document) => {
@@ -217,7 +402,8 @@ export class OrderIdempotencyStore {
       let contentionError: unknown;
       const token = randomUUID();
       const ownerPath = `${this.lockPath}.${process.pid}.${token}.owner`;
-      const metadata = JSON.stringify({ pid: process.pid, token });
+      const identity = this.processIdentity(process.pid);
+      const metadata = JSON.stringify({ pid: process.pid, token, ...(identity ? { identity } : {}) });
       try {
         const handle = await this.fileSystem.open(ownerPath, "wx", 0o600);
         let ownerInode = 0;
@@ -282,9 +468,9 @@ export class OrderIdempotencyStore {
     if (Date.now() - initialStat.mtimeMs < this.lockInitializationGraceMs) return false;
 
     const metadata = await this.fileSystem.readFile(this.lockPath, "utf8");
-    let owner: { pid?: unknown; token?: unknown } | undefined;
+    let owner: { pid?: unknown; token?: unknown; identity?: unknown } | undefined;
     try {
-      owner = JSON.parse(metadata) as { pid?: unknown; token?: unknown };
+      owner = JSON.parse(metadata) as { pid?: unknown; token?: unknown; identity?: unknown };
     } catch {
       owner = undefined;
     }
@@ -294,6 +480,12 @@ export class OrderIdempotencyStore {
       && typeof owner.token === "string"
       && this.isProcessAlive(owner.pid as number)
     ) {
+      if (typeof owner.identity === "string") {
+        const currentIdentity = this.processIdentity(owner.pid as number);
+        if (currentIdentity !== undefined && currentIdentity !== owner.identity) {
+          return this.unlinkIfUnchanged(Number(initialStat.ino), metadata);
+        }
+      }
       return false;
     }
     return this.unlinkIfUnchanged(Number(initialStat.ino), metadata);

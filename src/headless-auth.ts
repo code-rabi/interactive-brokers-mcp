@@ -1,5 +1,6 @@
 import { chromium, Browser, Page } from 'playwright-core';
 import { Logger } from './logger.js';
+import { redactConfigForLogging } from './cli-args.js';
 import { IBClient } from './ib-client.js';
 import { BrowserInstaller } from './browser-installer.js';
 import { TotpChallengeHandler } from './totp-strategy.js';
@@ -72,8 +73,7 @@ export class HeadlessAuthenticator {
       Logger.info('🔐 Starting headless authentication...');
       
       // Log the full auth config for debugging (excluding sensitive data)
-      const logConfig = { ...authConfig };
-      if (logConfig.password) logConfig.password = '[REDACTED]';
+      const logConfig = redactConfigForLogging({ ...authConfig });
       Logger.info(`🔍 Authentication config: ${JSON.stringify(logConfig, null, 2)}`);
       
       // Use local browser - let Playwright handle everything

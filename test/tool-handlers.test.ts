@@ -376,17 +376,97 @@ describe('ToolHandlers', () => {
   });
 
   describe('confirmOrder', () => {
-    it('should confirm order', async () => {
-      const mockResponse = { confirmed: true };
-      mockIBClient.confirmOrder = vi.fn().mockResolvedValue(mockResponse);
+    const warningOrder = {
+      clientOrderId: 'codex-confirm-chain',
+      accountId: 'U12345',
+      symbol: 'AAPL',
+      action: 'BUY' as const,
+      orderType: 'LMT' as const,
+      quantity: 1,
+      price: 150,
+    };
 
-      const result = await handlers.confirmOrder({
+    async function persistWarning(response: unknown, order = warningOrder) {
+      const store = context.orderIdempotencyStore!;
+      await store.reserve(order);
+      await store.recordResponse(order, response);
+    }
+
+    it('confirms an allowlisted persisted reply after restart and persists the next reply', async () => {
+      await persistWarning([{ id: 'reply-123', message: ['warning'] }]);
+      const mockResponse = [{ id: 'reply-456', message: ['next warning'] }];
+      mockIBClient.confirmOrder = vi.fn().mockResolvedValue(mockResponse);
+      const restarted = new ToolHandlers({
+        ...context,
+        orderIdempotencyStore: new OrderIdempotencyStore(path.join(orderStoreDir, 'orders.json')),
+      });
+
+      const result = await restarted.confirmOrder({
         replyId: 'reply-123',
         messageIds: ['msg1', 'msg2'],
       });
 
-      expect(result.content).toBeDefined();
+      expect(JSON.parse(result.content[0].text)).toEqual(mockResponse);
       expect(mockIBClient.confirmOrder).toHaveBeenCalledWith('reply-123', ['msg1', 'msg2']);
+      expect((await context.orderIdempotencyStore!.get(warningOrder.clientOrderId))?.confirmations)
+        .toMatchObject([{ replyId: 'reply-123', state: 'completed', response: mockResponse }]);
+    });
+
+    it('supports multiple confirmation steps across restarts', async () => {
+      await persistWarning([{ id: 'reply-1', message: ['warning'] }]);
+      mockIBClient.confirmOrder = vi.fn()
+        .mockResolvedValueOnce([{ id: 'reply-2', messageIds: ['o123'] }])
+        .mockResolvedValueOnce({ orderId: 'broker-order-1', status: 'Submitted' });
+
+      await new ToolHandlers({ ...context }).confirmOrder({ replyId: 'reply-1', messageIds: [] });
+      const second = await new ToolHandlers({
+        ...context,
+        orderIdempotencyStore: new OrderIdempotencyStore(path.join(orderStoreDir, 'orders.json')),
+      }).confirmOrder({ replyId: 'reply-2', messageIds: [] });
+
+      expect(JSON.parse(second.content[0].text)).toMatchObject({ orderId: 'broker-order-1' });
+      expect(mockIBClient.confirmOrder).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['unknown', [{ id: 'known', message: ['warning'] }]],
+      ['duplicate', [{ id: 'duplicate', message: ['warning'] }, { id: 'duplicate', messageIds: ['o123'] }]],
+    ])('fails closed for %s reply provenance', async (replyId, brokerResponse) => {
+      await persistWarning(brokerResponse);
+
+      const result = await handlers.confirmOrder({ replyId, messageIds: [] });
+
+      expect(result.content[0].text).toMatch(/not authorized|ambiguous/i);
+      expect(mockIBClient.confirmOrder).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the persisted record belongs to another account', async () => {
+      await persistWarning([{ id: 'reply-foreign', message: ['warning'] }], { ...warningOrder, accountId: 'U99999' });
+
+      const result = await handlers.confirmOrder({ replyId: 'reply-foreign', messageIds: [] });
+
+      expect(result.content[0].text).toMatch(/not authorized/i);
+      expect(mockIBClient.confirmOrder).not.toHaveBeenCalled();
+    });
+
+    it('returns SUBMISSION_UNCERTAIN and preserves brokerResponse when terminal persistence fails', async () => {
+      await persistWarning([{ id: 'reply-persist-fail', message: ['warning'] }]);
+      const brokerResponse = [{ id: 'reply-next-sensitive', message: ['warning'] }];
+      mockIBClient.confirmOrder = vi.fn().mockResolvedValue(brokerResponse);
+      const store = context.orderIdempotencyStore!;
+      vi.spyOn(store, 'recordConfirmationResponse').mockRejectedValueOnce(new Error('disk unavailable'));
+
+      const result = await handlers.confirmOrder({ replyId: 'reply-persist-fail', messageIds: [] });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed).toMatchObject({
+        code: 'SUBMISSION_UNCERTAIN',
+        submissionUncertain: true,
+        brokerResponse,
+      });
+      const replay = await handlers.confirmOrder({ replyId: 'reply-persist-fail', messageIds: [] });
+      expect(replay.content[0].text).toMatch(/already attempted|uncertain/i);
+      expect(mockIBClient.confirmOrder).toHaveBeenCalledTimes(1);
     });
   });
 
