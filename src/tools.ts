@@ -7,7 +7,8 @@ import {
   ActivateAlertZodShape,
   AuthenticateZodShape,
   ConfirmOrderZodShape,
-  CancelOrderZodShape,
+  CancelOrderZodSchema,
+  type CancelOrderInput,
   CreateAlertZodShape,
   DeleteAlertZodShape,
   ForgetFlexQueryZodShape,
@@ -49,6 +50,11 @@ export function registerTools(
     name: string,
     config: { description: string; inputSchema: typeof PlaceOrderZodSchema },
     handler: (args: PlaceOrderInput) => ReturnType<ToolHandlers["placeOrder"]>,
+  ) => unknown;
+  const registerCancelOrder = server.registerTool.bind(server) as unknown as (
+    name: string,
+    config: { description: string; inputSchema: typeof CancelOrderZodSchema },
+    handler: (args: CancelOrderInput) => ReturnType<ToolHandlers["cancelOrder"]>,
   ) => unknown;
   const registerTool = (
     name: string,
@@ -134,10 +140,12 @@ export function registerTools(
       ConfirmOrderZodShape,
       async (args) => await handlers.confirmOrder(args),
     );
-    registerTool(
+    registerCancelOrder(
       "cancel_order",
-      "Cancel a specific order in the allowlisted account. Verify the returned broker response and then check live orders. Usage: `{ \"accountId\": \"U12345\", \"orderId\": \"12345\" }`.",
-      CancelOrderZodShape,
+      {
+        description: "Cancel a specific order in the allowlisted account. Verify the returned broker response and then check live orders. Usage: `{ \"accountId\": \"U12345\", \"orderId\": \"12345\" }`.",
+        inputSchema: CancelOrderZodSchema,
+      },
       async (args) => await handlers.cancelOrder(args),
     );
   }

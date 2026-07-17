@@ -161,3 +161,49 @@ describe("place_order MCP entrypoint validation", () => {
     },
   );
 });
+
+describe("cancel_order MCP entrypoint validation", () => {
+  it("rejects unknown fields at the real callTool boundary without cancelling", async () => {
+    const server = new McpServer({ name: "test-server", version: "1.0.0" });
+    const ibClient = {
+      checkAuthenticationStatus: vi.fn().mockResolvedValue(true),
+      cancelOrder: vi.fn().mockResolvedValue({ orderId: "123", status: "Cancelled" }),
+    } as unknown as IBClient;
+    registerTools(server, ibClient, undefined, {
+      IB_READ_ONLY_MODE: false,
+      IB_ALLOWED_ACCOUNT_ID: "U12345",
+    });
+
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const { tools } = await client.listTools();
+      const cancelOrder = tools.find((tool) => tool.name === "cancel_order");
+      expect(cancelOrder?.inputSchema).toMatchObject({
+        type: "object",
+        required: expect.arrayContaining(["accountId", "orderId"]),
+        additionalProperties: false,
+      });
+      expect(Object.keys(cancelOrder?.inputSchema.properties ?? {})).toEqual(["accountId", "orderId"]);
+
+      const result = await client.callTool({
+        name: "cancel_order",
+        arguments: {
+          accountId: "U12345",
+          orderId: "123",
+          suppressConfirmations: true,
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toMatch(/unrecognized|invalid/i);
+      expect(ibClient.cancelOrder).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
