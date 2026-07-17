@@ -95,7 +95,8 @@ export class IBClient {
     const isOrderConfirmation = method.toUpperCase() === "POST"
       && /^\/iserver\/reply\/[^/]+$/.test(urlPath);
     const isOrderMutation = isOrderSubmission || isOrderCancellation || isOrderConfirmation;
-    Logger.log(`[REQUEST-${requestId}] ${method} ${urlPath}`, {
+    const logUrlPath = isOrderConfirmation ? "/iserver/reply/[REDACTED]" : urlPath;
+    Logger.log(`[REQUEST-${requestId}] ${method} ${logUrlPath}`, {
       timeout: options?.timeout ?? 30000,
       headers: options?.headers,
       data: isOrderMutation ? "[REDACTED ORDER REQUEST]" : options?.body,
@@ -112,7 +113,7 @@ export class IBClient {
     try {
       const result = await this.client.request<T>(method, urlPath, options);
       Logger.log(`[RESPONSE-${requestId}] ${result.status} ${result.statusText}`, {
-        url: urlPath,
+        url: logUrlPath,
         responseSize: JSON.stringify(result.data).length,
         dataPreview: isOrderMutation
           ? "[REDACTED ORDER RESPONSE]"
@@ -122,7 +123,7 @@ export class IBClient {
     } catch (error: unknown) {
       if (error instanceof HttpError) {
         Logger.error(`[ERROR-${requestId}] Request failed:`, {
-          url: urlPath,
+          url: logUrlPath,
           status: error.response.status,
           statusText: error.response.statusText,
           message: error.message,

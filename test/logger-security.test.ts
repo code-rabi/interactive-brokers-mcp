@@ -79,8 +79,8 @@ describe("Logger order-error security", () => {
       "  : new Response(JSON.stringify({ confirmed: true, secret: 'CONFIRM_SUCCESS_BODY_SECRET' }));",
       "const client = new IBClient({ host: 'localhost', port: 5000 });",
       "client.isAuthenticated = true;",
-      "await client.confirmOrder('reply-error', ['MESSAGE_ID_BODY_SECRET']).catch(() => undefined);",
-      "await client.confirmOrder('reply-success', ['MESSAGE_ID_SUCCESS_SECRET']);",
+      "await client.confirmOrder('RAW_REPLY_ERROR_CAPABILITY', ['MESSAGE_ID_BODY_SECRET']).catch(() => undefined);",
+      "await client.confirmOrder('RAW_REPLY_SUCCESS_CAPABILITY', ['MESSAGE_ID_SUCCESS_SECRET']);",
       "client.destroy();",
     ].join("\n");
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
@@ -96,6 +96,9 @@ describe("Logger order-error security", () => {
       "CONFIRM_SUCCESS_BODY_SECRET",
       "MESSAGE_ID_BODY_SECRET",
       "MESSAGE_ID_SUCCESS_SECRET",
+      "RAW_REPLY_ERROR_CAPABILITY",
+      "RAW_REPLY_SUCCESS_CAPABILITY",
     ]) expect(contents).not.toContain(secret);
+    expect(contents).toContain("/iserver/reply/[REDACTED]");
   });
 });
