@@ -1,0 +1,58 @@
+{
+  "$comment": "Pinned third-party dependency manifest for interactive-brokers-mcp v2. These artifacts are downloaded on demand at runtime and verified before use; nothing here is checked into the repo or shipped in the npm package. Regenerate with `npm run manifest:update`.",
+  "java": {
+    "vendor": "bellsoft-liberica",
+    "bundle": "jre",
+    "version": "11.0.31+11",
+    "comment": "BellSoft Liberica JRE 11 (LTS). URLs are immutable GitHub release assets; sha256 verified against BellSoft's published sha1 at pin time.",
+    "platforms": {
+      "darwin-arm64": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-macos-aarch64.tar.gz",
+        "archive": "tar.gz",
+        "sha256": "420d697126e9007bf514fde1876d8f7a0d37719ea8680a87a886d8f6718af26a"
+      },
+      "darwin-x64": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-macos-amd64.tar.gz",
+        "archive": "tar.gz",
+        "sha256": "c2a38c8c6f58ff11881a0a4fb562a0344bfd185329d8ac74a4533a492f8a17db"
+      },
+      "linux-x64": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-linux-amd64.tar.gz",
+        "archive": "tar.gz",
+        "sha256": "d9147b32654e150954412d46c88e8f18f0424bf2762ed8c5254c01ff1b2e8f80"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-linux-aarch64.tar.gz",
+        "archive": "tar.gz",
+        "sha256": "8654dfa4748021bc9160a0c3bdb31cdddbec17b05461876089ba9ccc37705788"
+      },
+      "linux-x64-musl": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-linux-x64-musl.tar.gz",
+        "archive": "tar.gz",
+        "sha256": "474cb3ddc9baaf7d40ff906f5a1cb9815c5a97554581471db39e3f1ebcc72d3f"
+      },
+      "linux-arm64-musl": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-linux-aarch64-musl.tar.gz",
+        "archive": "tar.gz",
+        "sha256": "3b720f8b912ea6d742f7b91abe9e97be51baae50e074933693e8c317e88f59b7"
+      },
+      "win32-x64": {
+        "url": "https://github.com/bell-sw/Liberica/releases/download/11.0.31+11/bellsoft-jre11.0.31+11-windows-amd64.zip",
+        "archive": "zip",
+        "sha256": "56770d5ecfc95ba2a31c1d8e935e03aed466c2b382cacdbdd838cce4cf2b659d"
+      }
+    }
+  },
+  "gateway": {
+    "vendor": "interactive-brokers",
+    "channel": "stable",
+    "version": "2023-04-24",
+    "comment": "IB Client Portal Gateway. IB only ships a rolling 'latest' zip over HTTPS with no published checksum; the bytes are verified against this pinned sha256 AND against the live MD5 that IB's Akamai CDN exposes in the ETag header at download time. host must stay on the official IB distribution domain.",
+    "url": "https://download2.interactivebrokers.com/portal/clientportal.gw.zip",
+    "host": "download2.interactivebrokers.com",
+    "archive": "zip",
+    "sha256": "2f2d380b2f9424520ff5f9c11fe45e82ef39459329ac056258a3274bea6f76f9",
+    "md5": "c2b67c3c10259ecb1313cdfc2a49ae91",
+    "size": 10542956
+  }
+}

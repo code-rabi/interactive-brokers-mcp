@@ -98,13 +98,12 @@ public
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
-# Built files (but not IB Gateway distribution files or runtime libs)
+# Built files. In v2 the IB Gateway jars and Java runtimes are no longer bundled; they are
+# downloaded on demand into the per-user cache, so nothing under build/ dist/ runtime/ is tracked.
 build/
-!ib-gateway/clientportal.gw/build/
 dist/
-!ib-gateway/clientportal.gw/dist/
 lib/
-!runtime/*/lib/
+runtime/
 
 # Temporary build files
 temp-*

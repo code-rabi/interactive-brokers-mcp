@@ -16,9 +16,10 @@ FROM node:lts-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Copy production artifacts
+# Copy production artifacts. dependencies.manifest.json is loaded at runtime from the package
+# root by DependencyResolver, so it must ship alongside dist/.
 COPY --from=build /app/dist ./dist
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json dependencies.manifest.json ./
 
 # Install production dependencies
 RUN npm ci --production --ignore-scripts
