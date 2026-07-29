@@ -214,6 +214,29 @@ describe('ToolHandlers', () => {
       );
     });
 
+    it('should forward conidex and cashQuantity for restricted contract orders', async () => {
+      mockIBClient.order = vi.fn().mockResolvedValue({ orderId: '123' });
+
+      await handlers.placeOrder({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conidex: '479624278@PAXOS',
+        secType: 'CRYPTO',
+        action: 'BUY',
+        orderType: 'MKT',
+        cashQuantity: 1000,
+        tif: 'IOC',
+      });
+
+      expect(mockIBClient.order).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conidex: '479624278@PAXOS',
+          secType: 'CRYPTO',
+          cashQuantity: 1000,
+        }),
+      );
+    });
+
     it('should handle order placement errors', async () => {
       mockIBClient.order = vi.fn().mockRejectedValue(new Error('Order failed'));
 

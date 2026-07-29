@@ -131,6 +131,12 @@ export async function resolveContract(
     return resolveOptionContract(client, request);
   }
 
+  if (request.secType && request.secType !== "STK") {
+    throw new Error(
+      `${request.secType} contract resolution requires conid; symbol resolution is only supported for STK, OPT, and FUND`,
+    );
+  }
+
   if (!request.symbol) {
     throw new Error("Symbol is required when conid is not provided");
   }

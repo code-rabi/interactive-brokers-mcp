@@ -222,7 +222,7 @@ To reset the managed Gateway session, stop the Gateway process recorded in `ib-g
 | `get_account_info` | Retrieve account information and balances |
 | `get_positions`    | Get current positions and P&L             |
 | `get_market_data`  | Real-time market data for symbols         |
-| `place_order`      | Preview (`PREVIEW`) or submit (`SUBMIT`) stock, option, and FUNDSERV fund orders using one harmonized payload; supports full-position closes |
+| `place_order`      | Preview (`PREVIEW`) or submit (`SUBMIT`) orders for all IBKR Web API order security types using one harmonized payload; supports FUNDSERV funds, crypto/combo `conidex`, cash quantities, and full-position closes |
 | `get_order_status` | Check order execution status              |
 | `get_live_orders`  | Get all live/open orders for monitoring   |
 

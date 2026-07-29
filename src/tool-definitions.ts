@@ -1,11 +1,12 @@
 import z from "zod";
+import { IBKR_ORDER_SECURITY_TYPES } from "./ib-client/types.js";
 
 const IntegerOrStringIntegerZod = z.union([
   z.number().positive(),
   z.string().regex(/^[0-9]+(\.[0-9]+)?$/).transform((val) => parseFloat(val))
 ]);
 
-const SecurityTypeZod = z.enum(["STK", "OPT", "FUND"]);
+const SecurityTypeZod = z.enum(IBKR_ORDER_SECURITY_TYPES);
 const OptionRightZod = z.enum(["C", "P"]);
 
 export const AuthenticateZodShape = {
@@ -43,6 +44,7 @@ export const PlaceOrderZodShape = {
   accountId: z.string(),
   symbol: z.string().optional(),
   conid: IntegerOrStringIntegerZod.optional(),
+  conidex: z.string().trim().min(1).optional(),
   secType: SecurityTypeZod.optional(),
   expiry: z.string().optional(),
   strike: IntegerOrStringIntegerZod.optional(),
@@ -50,6 +52,7 @@ export const PlaceOrderZodShape = {
   action: z.enum(["BUY", "SELL"]),
   orderType: z.enum(["MKT", "LMT", "STP"]),
   quantity: IntegerOrStringIntegerZod.optional(),
+  cashQuantity: z.number().positive().optional(),
   fullPosition: z.boolean().optional(),
   price: z.number().optional(),
   stopPrice: z.number().optional(),
@@ -156,28 +159,78 @@ export const PlaceOrderZodSchema = z
       });
     }
 
-    if (!data.symbol && data.conid === undefined) {
+    if (!data.symbol && data.conid === undefined && data.conidex === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Either symbol or conid is required",
+        message: "One of symbol, conid, or conidex is required",
         path: ["symbol"]
       });
     }
 
-    if (data.quantity === undefined && data.fullPosition !== true) {
+    const sizeFields = [
+      data.quantity !== undefined,
+      data.cashQuantity !== undefined,
+      data.fullPosition === true,
+    ].filter(Boolean).length;
+    if (sizeFields === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Either quantity or fullPosition: true is required",
+        message: "One of quantity, cashQuantity, or fullPosition: true is required",
         path: ["quantity"]
       });
     }
 
-    if (data.quantity !== undefined && data.fullPosition === true) {
+    if (sizeFields > 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "quantity and fullPosition cannot be used together",
+        message: "quantity, cashQuantity, and fullPosition are mutually exclusive",
         path: ["fullPosition"]
       });
+    }
+
+    if (
+      data.secType
+      && !["STK", "OPT", "FUND"].includes(data.secType)
+      && data.conid === undefined
+      && data.conidex === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${data.secType} orders require conid or conidex`,
+        path: ["conid"]
+      });
+    }
+
+    if (data.secType === "BAG" && data.conidex === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "BAG orders require the full combo composition in conidex",
+        path: ["conidex"]
+      });
+    }
+
+    if (data.secType === "CRYPTO") {
+      if (!data.exchange && !data.conidex?.includes("@")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "CRYPTO orders require exchange or an exchange-qualified conidex",
+          path: ["exchange"]
+        });
+      }
+      if (data.action === "BUY" && data.orderType === "MKT" && data.cashQuantity === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "CRYPTO market buys require cashQuantity",
+          path: ["cashQuantity"]
+        });
+      }
+      if (data.orderType === "MKT" && data.tif !== undefined && data.tif !== "IOC") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "CRYPTO market orders require tif IOC",
+          path: ["tif"]
+        });
+      }
     }
 
     if (data.secType === "OPT" && data.conid === undefined) {

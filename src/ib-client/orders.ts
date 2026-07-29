@@ -7,6 +7,7 @@ import {
   type OrderPayload,
   type OrderConfirmation,
   type OrderRequest,
+  type SecurityType,
   AuthenticationError,
   SymbolNotFoundError,
   isAuthenticationError,
@@ -87,7 +88,7 @@ function contractSupportsFund(contract: ContractSearch, exchange: string): boole
 async function resolveOrderContract(
   client: IBClientRequester,
   orderRequest: OrderRequest,
-): Promise<{ conid: number; secType: "STK" | "OPT" | "FUND" }> {
+): Promise<{ conid: number; secType: SecurityType }> {
   if (orderRequest.secType !== "FUND" || orderRequest.conid !== undefined) {
     const contract = await resolveContract(client, orderRequest);
     return { conid: contract.conid, secType: contract.secType };
@@ -107,6 +108,13 @@ async function resolveOrderContract(
   }
 
   return { conid: Number(contract.conid), secType: "FUND" };
+}
+
+function conidFromConidex(conidex: string | undefined): number | undefined {
+  const match = conidex?.match(/^(\d+)/);
+  if (!match) return undefined;
+  const conid = Number(match[1]);
+  return Number.isSafeInteger(conid) && conid > 0 ? conid : undefined;
 }
 
 function positionEntries(data: unknown): Array<Record<string, unknown>> {
@@ -156,38 +164,98 @@ async function resolveFullPositionQuantity(
   return Math.abs(position);
 }
 
+interface BuiltOrderPayload {
+  payload: OrderPayload;
+  referenceConid?: number;
+}
+
 async function buildOrderPayload(
   client: IBClientRequester,
   orderRequest: OrderRequest,
-): Promise<OrderPayload> {
-  const contract = await resolveOrderContract(client, orderRequest);
-  const quantity = orderRequest.fullPosition
-    ? await resolveFullPositionQuantity(
-      client,
-      orderRequest.accountId,
-      contract.conid,
-      orderRequest.action,
-    )
-    : Number(orderRequest.quantity);
+): Promise<BuiltOrderPayload> {
+  const secType = orderRequest.secType || "STK";
+  if (orderRequest.conidex && secType !== "BAG" && secType !== "CRYPTO") {
+    throw new Error("conidex is only supported for BAG and CRYPTO orders");
+  }
 
-  if (!Number.isFinite(quantity) || quantity <= 0) {
+  const contract = (secType === "BAG" || secType === "CRYPTO") && orderRequest.conidex
+    ? undefined
+    : await resolveOrderContract(client, orderRequest);
+  const referenceConid = contract?.conid
+    ?? (secType === "CRYPTO" ? conidFromConidex(orderRequest.conidex) : undefined);
+  const sizeFieldCount = [
+    orderRequest.quantity !== undefined,
+    orderRequest.cashQuantity !== undefined,
+    orderRequest.fullPosition === true,
+  ].filter(Boolean).length;
+  if (sizeFieldCount !== 1) {
+    throw new Error("Exactly one of quantity, cashQuantity, or fullPosition must be provided");
+  }
+  const quantity = orderRequest.fullPosition
+    ? referenceConid === undefined
+      ? undefined
+      : await resolveFullPositionQuantity(
+        client,
+        orderRequest.accountId,
+        referenceConid,
+        orderRequest.action,
+      )
+    : orderRequest.quantity === undefined ? undefined : Number(orderRequest.quantity);
+  const cashQuantity = orderRequest.cashQuantity === undefined
+    ? undefined
+    : Number(orderRequest.cashQuantity);
+
+  if (quantity !== undefined && (!Number.isFinite(quantity) || quantity <= 0)) {
     throw new Error("Order quantity must be a positive number");
+  }
+  if (cashQuantity !== undefined && (!Number.isFinite(cashQuantity) || cashQuantity <= 0)) {
+    throw new Error("Order cashQuantity must be a positive number");
+  }
+  if (quantity === undefined && cashQuantity === undefined) {
+    throw new Error("Order requires quantity, cashQuantity, or a resolvable full position");
+  }
+  if (
+    secType === "CRYPTO"
+    && orderRequest.action === "BUY"
+    && orderRequest.orderType === "MKT"
+    && cashQuantity === undefined
+  ) {
+    throw new Error("CRYPTO market buys require cashQuantity");
   }
 
   const orderPayload: OrderPayload = {
-    conid: contract.conid,
     orderType: orderRequest.orderType,
     side: orderRequest.action,
-    quantity,
     tif: orderRequest.tif || "DAY",
   };
+  if (quantity !== undefined) orderPayload.quantity = quantity;
+  if (cashQuantity !== undefined) orderPayload.cashQty = cashQuantity;
 
-  if (orderRequest.secType) {
+  if (secType === "BAG") {
+    if (!orderRequest.conidex) {
+      throw new Error("BAG orders require the full combo composition in conidex");
+    }
+    orderPayload.conidex = orderRequest.conidex;
+  } else if (secType === "CRYPTO") {
+    const conidex = orderRequest.conidex
+      ?? (contract && orderRequest.exchange
+        ? `${contract.conid}@${orderRequest.exchange}`
+        : undefined);
+    if (!conidex || !conidex.includes("@")) {
+      throw new Error("CRYPTO orders require an exchange-qualified conidex or conid plus exchange");
+    }
+    orderPayload.conidex = conidex;
+    if (orderRequest.orderType === "MKT") orderPayload.tif = "IOC";
+  } else if (contract) {
+    orderPayload.conid = contract.conid;
+  }
+
+  if (orderRequest.secType && contract) {
     orderPayload.secType = `${contract.conid}:${contract.secType}`;
   }
   const listingExchange = orderRequest.exchange
-    || (contract.secType === "FUND" ? "FUNDSERV" : undefined);
-  if (listingExchange) orderPayload.listingExchange = listingExchange;
+    || (contract?.secType === "FUND" ? "FUNDSERV" : undefined);
+  if (listingExchange && secType !== "CRYPTO") orderPayload.listingExchange = listingExchange;
   if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
     orderPayload.price = Number(orderRequest.price);
   }
@@ -195,20 +263,21 @@ async function buildOrderPayload(
     orderPayload.auxPrice = Number(orderRequest.stopPrice);
   }
 
-  return orderPayload;
+  return { payload: orderPayload, referenceConid };
 }
 
 export async function order(client: IBClientRequester, orderRequest: OrderRequest): Promise<unknown> {
   try {
-    const orderPayload = await buildOrderPayload(client, orderRequest);
+    const builtOrder = await buildOrderPayload(client, orderRequest);
+    const orderPayload = builtOrder.payload;
     const body = { orders: [orderPayload] };
     const endpoint = orderRequest.mode === "PREVIEW"
       ? `/iserver/account/${orderRequest.accountId}/orders/whatif`
       : `/iserver/account/${orderRequest.accountId}/orders`;
 
-    if (orderRequest.mode === "PREVIEW") {
+    if (orderRequest.mode === "PREVIEW" && builtOrder.referenceConid !== undefined) {
       await client.request("GET", "/iserver/marketdata/snapshot", {
-        params: { conids: String(orderPayload.conid), fields: "31" },
+        params: { conids: String(builtOrder.referenceConid), fields: "31" },
       });
     }
 

@@ -590,6 +590,104 @@ describe('IBClient', () => {
         });
       });
 
+      it('should pass every ordinary restricted contract type through by conid', async () => {
+        mockFetch.mockImplementation(async () =>
+          mockResponse([{ order_id: 'restricted-order-123' }])
+        );
+
+        for (const secType of [
+          'FUT',
+          'FOP',
+          'CASH',
+          'WAR',
+          'BOND',
+          'CMDTY',
+          'FUND',
+          'CFD',
+          'IOPT',
+        ] as const) {
+          await client.order({
+            mode: 'SUBMIT',
+            accountId: 'U12345',
+            conid: 123456,
+            secType,
+            exchange: 'SMART',
+            action: 'SELL',
+            orderType: 'LMT',
+            quantity: 1,
+            price: 10,
+          });
+        }
+
+        const orderCalls = mockFetch.mock.calls.filter(([url]: [string]) =>
+          url.endsWith('/iserver/account/U12345/orders')
+        );
+        expect(orderCalls).toHaveLength(9);
+        expect(orderCalls.map(([, init]) => JSON.parse(init.body).orders[0].secType))
+          .toEqual([
+            '123456:FUT',
+            '123456:FOP',
+            '123456:CASH',
+            '123456:WAR',
+            '123456:BOND',
+            '123456:CMDTY',
+            '123456:FUND',
+            '123456:CFD',
+            '123456:IOPT',
+          ]);
+      });
+
+      it('should submit crypto with conidex and cashQty instead of conid', async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse([{ order_id: 'crypto-order-123' }]));
+
+        await client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          conid: 479624278,
+          secType: 'CRYPTO',
+          exchange: 'PAXOS',
+          action: 'BUY',
+          orderType: 'MKT',
+          cashQuantity: 1000,
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual({
+          conidex: '479624278@PAXOS',
+          orderType: 'MKT',
+          side: 'BUY',
+          cashQty: 1000,
+          tif: 'IOC',
+          secType: '479624278:CRYPTO',
+        });
+      });
+
+      it('should preserve a complete combo conidex without inventing a conid', async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse([{ order_id: 'combo-order-123' }]));
+        const conidex = '28812380;;;265598/1,272093/-1';
+
+        await client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          conidex,
+          secType: 'BAG',
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 1.25,
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual({
+          conidex,
+          orderType: 'LMT',
+          side: 'BUY',
+          quantity: 1,
+          tif: 'DAY',
+          price: 1.25,
+        });
+      });
+
       it('should use byte-equivalent order bodies for PREVIEW and SUBMIT full-position fund orders', async () => {
         const position = [{ conid: 4815747, position: 37.625, assetClass: 'FUND' }];
         mockFetch

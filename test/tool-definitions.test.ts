@@ -11,8 +11,22 @@ import {
   ActivateAlertZodSchema,
   DeleteAlertZodSchema,
 } from '../src/tool-definitions.js';
+import {
+  IBKR_ORDER_SECURITY_TYPES,
+  IBKR_SECURITY_TYPES,
+} from '../src/ib-client/types.js';
 
 describe('Tool Definitions - Zod Schemas', () => {
+  it('tracks the complete IBKR security-type vocabulary separately from orderable types', () => {
+    expect(IBKR_SECURITY_TYPES).toEqual([
+      'STK', 'OPT', 'FUT', 'IND', 'FOP', 'CASH', 'BAG', 'WAR', 'BOND',
+      'CMDTY', 'NEWS', 'FUND', 'CFD', 'IOPT', 'CRYPTO', 'CONTFUT', 'EFP', 'EC',
+    ]);
+    expect(IBKR_ORDER_SECURITY_TYPES).not.toContain('IND');
+    expect(IBKR_ORDER_SECURITY_TYPES).not.toContain('CONTFUT');
+    expect(IBKR_ORDER_SECURITY_TYPES).not.toContain('EC');
+  });
+
   describe('PlaceOrderZodSchema', () => {
     it('should accept valid market order', () => {
       const validOrder = {
@@ -268,6 +282,101 @@ describe('Tool Definitions - Zod Schemas', () => {
       });
 
       expect(result.success).toBe(false);
+    });
+
+    it.each([
+      'STK',
+      'OPT',
+      'FUT',
+      'FOP',
+      'CASH',
+      'WAR',
+      'BOND',
+      'CMDTY',
+      'FUND',
+      'CFD',
+      'IOPT',
+    ] as const)('should accept IBKR order security type %s with a conid', (secType) => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conid: 123456,
+        secType,
+        action: 'SELL',
+        orderType: 'LMT',
+        quantity: 1,
+        price: 10,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept CRYPTO cash orders and BAG conidex orders', () => {
+      expect(PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conid: 479624278,
+        secType: 'CRYPTO',
+        exchange: 'PAXOS',
+        action: 'BUY',
+        orderType: 'MKT',
+        cashQuantity: 1000,
+        tif: 'IOC',
+      }).success).toBe(true);
+
+      expect(PlaceOrderZodSchema.safeParse({
+        mode: 'PREVIEW',
+        accountId: 'U12345',
+        conidex: '28812380;;;265598/1,272093/-1',
+        secType: 'BAG',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 1,
+        price: 1.25,
+      }).success).toBe(true);
+    });
+
+    it.each(['IND', 'NEWS', 'CONTFUT', 'EC'])(
+      'should reject discovery-only security type %s for orders',
+      (secType) => {
+        expect(PlaceOrderZodSchema.safeParse({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          conid: 123456,
+          secType,
+          action: 'BUY',
+          orderType: 'MKT',
+          quantity: 1,
+        }).success).toBe(false);
+      },
+    );
+
+    it('should require conid for security types without symbolic resolution', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        symbol: 'ES',
+        secType: 'FUT',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject invalid crypto market-buy sizing and tif', () => {
+      expect(PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conid: 479624278,
+        secType: 'CRYPTO',
+        exchange: 'PAXOS',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+        tif: 'DAY',
+      }).success).toBe(false);
     });
   });
 

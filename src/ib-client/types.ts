@@ -1,5 +1,48 @@
 import { HttpError } from "../http.js";
 
+export const IBKR_SECURITY_TYPES = [
+  "STK",
+  "OPT",
+  "FUT",
+  "IND",
+  "FOP",
+  "CASH",
+  "BAG",
+  "WAR",
+  "BOND",
+  "CMDTY",
+  "NEWS",
+  "FUND",
+  "CFD",
+  "IOPT",
+  "CRYPTO",
+  "CONTFUT",
+  "EFP",
+  "EC",
+] as const;
+
+export type SecurityType = typeof IBKR_SECURITY_TYPES[number];
+
+// Discovery/data-only types and legacy EFP contracts are intentionally kept
+// out of this tool's order schema; EC is a secdef marker, not an order type.
+export const IBKR_ORDER_SECURITY_TYPES = [
+  "STK",
+  "OPT",
+  "FUT",
+  "FOP",
+  "CASH",
+  "BAG",
+  "WAR",
+  "BOND",
+  "CMDTY",
+  "FUND",
+  "CFD",
+  "IOPT",
+  "CRYPTO",
+] as const satisfies readonly SecurityType[];
+
+export type OrderSecurityType = typeof IBKR_ORDER_SECURITY_TYPES[number];
+
 export interface AuthStatusResponse {
   authenticated?: boolean;
   connected?: boolean;
@@ -54,10 +97,12 @@ export interface OrderConfirmation {
 }
 
 export interface OrderPayload {
-  conid: number;
+  conid?: number;
+  conidex?: string;
   orderType: string;
   side: string;
-  quantity: number;
+  quantity?: number;
+  cashQty?: number;
   tif: string;
   secType?: string;
   listingExchange?: string;
@@ -78,7 +123,8 @@ export interface IBClientConfig {
 export interface ContractLookupRequest {
   symbol?: string;
   conid?: number;
-  secType?: "STK" | "OPT" | "FUND";
+  conidex?: string;
+  secType?: OrderSecurityType;
   expiry?: string;
   strike?: number;
   right?: "C" | "P";
@@ -91,6 +137,7 @@ export interface OrderRequest extends ContractLookupRequest {
   action: "BUY" | "SELL";
   orderType: "MKT" | "LMT" | "STP";
   quantity?: number;
+  cashQuantity?: number;
   fullPosition?: boolean;
   price?: number;
   stopPrice?: number;
@@ -101,7 +148,7 @@ export interface OrderRequest extends ContractLookupRequest {
 export interface ResolvedContract {
   conid: number;
   symbol: string;
-  secType: "STK" | "OPT" | "FUND";
+  secType: SecurityType;
   contract: ContractSearch | OptionContractInfo;
   underlyingConid?: number;
 }
