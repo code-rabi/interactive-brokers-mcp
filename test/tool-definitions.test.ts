@@ -11,11 +11,26 @@ import {
   ActivateAlertZodSchema,
   DeleteAlertZodSchema,
 } from '../src/tool-definitions.js';
+import {
+  IBKR_ORDER_SECURITY_TYPES,
+  IBKR_SECURITY_TYPES,
+} from '../src/ib-client/types.js';
 
 describe('Tool Definitions - Zod Schemas', () => {
+  it('tracks the complete IBKR security-type vocabulary separately from orderable types', () => {
+    expect(IBKR_SECURITY_TYPES).toEqual([
+      'STK', 'OPT', 'FUT', 'IND', 'FOP', 'CASH', 'BAG', 'WAR', 'BOND',
+      'CMDTY', 'NEWS', 'FUND', 'CFD', 'IOPT', 'CRYPTO', 'CONTFUT', 'EFP', 'EC',
+    ]);
+    expect(IBKR_ORDER_SECURITY_TYPES).not.toContain('IND');
+    expect(IBKR_ORDER_SECURITY_TYPES).not.toContain('CONTFUT');
+    expect(IBKR_ORDER_SECURITY_TYPES).not.toContain('EC');
+  });
+
   describe('PlaceOrderZodSchema', () => {
     it('should accept valid market order', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -29,6 +44,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept fractional quantities as numbers', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -45,6 +61,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept fractional quantities as strings', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -61,6 +78,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept integer quantities as strings', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -77,6 +95,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject negative quantities', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -90,6 +109,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject zero quantity', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -103,6 +123,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should require price for LMT orders', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -116,6 +137,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept valid LMT order with price', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -130,6 +152,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should require stopPrice for STP orders', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'SELL' as const,
@@ -143,6 +166,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept valid STP order with stopPrice', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'SELL' as const,
@@ -157,6 +181,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept suppressConfirmations flag', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -173,6 +198,7 @@ describe('Tool Definitions - Zod Schemas', () => {
       'should accept tif value %s',
       (tif) => {
         const validOrder = {
+          mode: 'SUBMIT' as const,
           accountId: 'U12345',
           symbol: 'AAPL',
           action: 'BUY' as const,
@@ -188,6 +214,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject an invalid tif value', () => {
       const invalidOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -202,6 +229,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept exchange when provided alongside required fields', () => {
       const validOrder = {
+        mode: 'SUBMIT' as const,
         accountId: 'U12345',
         symbol: 'AAPL',
         action: 'BUY' as const,
@@ -212,6 +240,192 @@ describe('Tool Definitions - Zod Schemas', () => {
 
       const result = PlaceOrderZodSchema.safeParse(validOrder);
       expect(result.success).toBe(true);
+    });
+
+    it.each(['PREVIEW', 'SUBMIT'] as const)('should accept mode %s', (mode) => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode,
+        accountId: 'U12345',
+        conid: 123456,
+        secType: 'FUND',
+        action: 'SELL',
+        orderType: 'MKT',
+        fullPosition: true,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject unsupported modes', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'DRY_RUN',
+        accountId: 'U12345',
+        symbol: 'AAPL',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject quantity together with fullPosition', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'PREVIEW',
+        accountId: 'U12345',
+        conid: 123456,
+        secType: 'FUND',
+        action: 'SELL',
+        orderType: 'MKT',
+        quantity: 1,
+        fullPosition: true,
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it.each([
+      'STK',
+      'OPT',
+      'FUT',
+      'FOP',
+      'CASH',
+      'WAR',
+      'BOND',
+      'CMDTY',
+      'FUND',
+      'CFD',
+      'IOPT',
+    ] as const)('should accept IBKR order security type %s with a conid', (secType) => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conid: 123456,
+        secType,
+        action: 'SELL',
+        orderType: 'LMT',
+        quantity: 1,
+        price: 10,
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should accept CRYPTO cash orders and BAG conidex orders', () => {
+      expect(PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conid: 479624278,
+        secType: 'CRYPTO',
+        exchange: 'PAXOS',
+        action: 'BUY',
+        orderType: 'MKT',
+        cashQuantity: 1000,
+        tif: 'IOC',
+      }).success).toBe(true);
+
+      expect(PlaceOrderZodSchema.safeParse({
+        mode: 'PREVIEW',
+        accountId: 'U12345',
+        conidex: '28812380;;;265598/1,272093/-1',
+        secType: 'BAG',
+        action: 'BUY',
+        orderType: 'LMT',
+        quantity: 1,
+        price: 1.25,
+      }).success).toBe(true);
+    });
+
+    it.each(['IND', 'NEWS', 'CONTFUT', 'EC'])(
+      'should reject discovery-only security type %s for orders',
+      (secType) => {
+        expect(PlaceOrderZodSchema.safeParse({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          conid: 123456,
+          secType,
+          action: 'BUY',
+          orderType: 'MKT',
+          quantity: 1,
+        }).success).toBe(false);
+      },
+    );
+
+    it('should require conid for security types without symbolic resolution', () => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        symbol: 'ES',
+        secType: 'FUT',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject invalid crypto market-buy sizing and tif', () => {
+      expect(PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        conid: 479624278,
+        secType: 'CRYPTO',
+        exchange: 'PAXOS',
+        action: 'BUY',
+        orderType: 'MKT',
+        quantity: 1,
+        tif: 'DAY',
+      }).success).toBe(false);
+    });
+
+    it.each([
+      {
+        name: 'missing contract identifier',
+        order: { quantity: 1 },
+        paths: ['symbol'],
+      },
+      {
+        name: 'missing size',
+        order: { conid: 123456 },
+        paths: ['quantity'],
+      },
+      {
+        name: 'BAG without a complete conidex',
+        order: { conid: 123456, secType: 'BAG', quantity: 1 },
+        paths: ['conidex'],
+      },
+      {
+        name: 'CRYPTO without an exchange-qualified contract',
+        order: {
+          conid: 479624278,
+          secType: 'CRYPTO',
+          action: 'SELL',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        },
+        paths: ['exchange'],
+      },
+      {
+        name: 'OPT without symbolic contract fields',
+        order: { secType: 'OPT', quantity: 1 },
+        paths: ['symbol', 'expiry', 'strike', 'right'],
+      },
+    ])('should reject $name', ({ order, paths }) => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        action: 'BUY',
+        orderType: 'MKT',
+        ...order,
+      });
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.map((issue) => String(issue.path[0])))
+          .toEqual(expect.arrayContaining(paths));
+      }
     });
   });
 
@@ -427,6 +641,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should accept option orders with contract details', () => {
       const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
         accountId: 'U12345',
         symbol: 'AAPL',
         secType: 'OPT',
@@ -444,6 +659,7 @@ describe('Tool Definitions - Zod Schemas', () => {
 
     it('should reject option orders missing expiry when conid is not provided', () => {
       const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
         accountId: 'U12345',
         symbol: 'AAPL',
         secType: 'OPT',

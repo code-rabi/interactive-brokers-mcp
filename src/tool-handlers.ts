@@ -703,10 +703,12 @@ export class ToolHandlers {
       return auth.result;
     }
     try {
-      const result = await this.context.ibClient.placeOrder({
+      const result = await this.context.ibClient.order({
+        mode: input.mode,
         accountId: input.accountId,
         symbol: input.symbol,
         conid: input.conid,
+        conidex: input.conidex,
         secType: input.secType,
         expiry: input.expiry,
         strike: input.strike,
@@ -714,6 +716,8 @@ export class ToolHandlers {
         action: input.action,
         orderType: input.orderType,
         quantity: input.quantity, // Already converted by Zod schema
+        cashQuantity: input.cashQuantity,
+        fullPosition: input.fullPosition,
         price: input.price,
         stopPrice: input.stopPrice,
         suppressConfirmations: input.suppressConfirmations,

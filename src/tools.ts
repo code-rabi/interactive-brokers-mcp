@@ -90,13 +90,13 @@ export function registerTools(
   if (!userConfig?.IB_READ_ONLY_MODE) {
     registerTool(
       "place_order",
-      "Place a trading order. Examples:\n" +
-        "- Market buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
-        "- Limit sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":185.5 }`\n" +
-        "- Stop sell: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"SELL\",\"orderType\":\"STP\",\"quantity\":1,\"stopPrice\":180 }`\n" +
-        "- Option buy: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"secType\":\"OPT\",\"expiry\":\"JAN27\",\"strike\":200,\"right\":\"C\",\"action\":\"BUY\",\"orderType\":\"LMT\",\"quantity\":1,\"price\":4.5 }`\n" +
-        "- Option by conid: `{ \"accountId\":\"abc\",\"conid\":123456789,\"secType\":\"OPT\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
-        "- Suppress confirmations: `{ \"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1,\"suppressConfirmations\":true }`",
+      "Preview or submit one order using the same normalized IBKR payload. Supports IBKR order security types STK, OPT, FUT, FOP, CASH, BAG, WAR, BOND, CMDTY, FUND, CFD, IOPT, and CRYPTO. Set mode to PREVIEW for /whatif (no order is submitted) or SUBMIT for a live order. Examples:\n" +
+        "- Preview: `{ \"mode\":\"PREVIEW\",\"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
+        "- Submit: `{ \"mode\":\"SUBMIT\",\"accountId\":\"abc\",\"symbol\":\"AAPL\",\"action\":\"BUY\",\"orderType\":\"MKT\",\"quantity\":1 }`\n" +
+        "- Preview full mutual-fund sale: `{ \"mode\":\"PREVIEW\",\"accountId\":\"abc\",\"conid\":123456789,\"secType\":\"FUND\",\"exchange\":\"FUNDSERV\",\"action\":\"SELL\",\"orderType\":\"MKT\",\"fullPosition\":true }`\n" +
+        "- Submit full mutual-fund sale: use the identical input with `mode` set to `SUBMIT`.\n" +
+        "- Crypto market buy: use `secType:\"CRYPTO\"`, an exchange-qualified `conidex`, `cashQuantity`, and `tif:\"IOC\"`.\n" +
+        "- Combo: use `secType:\"BAG\"` and the complete IBKR spread composition in `conidex`.",
       PlaceOrderZodShape,
       async (args) => await handlers.placeOrder(args),
     );

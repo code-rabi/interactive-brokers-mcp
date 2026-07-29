@@ -365,7 +365,7 @@ describe('IBClient', () => {
         await expect(client.getMarketData('INVALID')).rejects.toBeInstanceOf(SymbolNotFoundError);
       });
 
-      it('should include exchange in secdef/search URL when provided', async () => {
+      it('should not misuse the secdef name flag for exchange filtering', async () => {
         mockFetch
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, symbol: 'AAPL' }]))
           .mockResolvedValueOnce(mockResponse([{ conid: 265598, price: 150.25 }]));
@@ -496,7 +496,11 @@ describe('IBClient', () => {
         });
 
         expect(mockFetch).toHaveBeenCalledWith(
-          expect.stringContaining('/iserver/secdef/search?symbol=AAPL&name=NASDAQ'),
+          expect.stringContaining('/iserver/secdef/search?symbol=AAPL'),
+          expect.anything()
+        );
+        expect(mockFetch).not.toHaveBeenCalledWith(
+          expect.stringContaining('name=NASDAQ'),
           expect.anything()
         );
       });
@@ -516,7 +520,7 @@ describe('IBClient', () => {
         });
 
         const body = findCallBody('/iserver/account/U12345/orders');
-        expect(body.orders[0]).toEqual(expect.objectContaining({ exchange: 'NASDAQ' }));
+        expect(body.orders[0]).toEqual(expect.objectContaining({ listingExchange: 'NASDAQ' }));
       });
 
       it('should propagate SymbolNotFoundError when symbol cannot be resolved', async () => {
@@ -551,6 +555,381 @@ describe('IBClient', () => {
         expect(body.orders[0]).toEqual(expect.objectContaining({
           auxPrice: 140.00,
         }));
+      });
+
+      it('should resolve and submit a FUNDSERV mutual-fund order by symbol', async () => {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{
+            conid: 141432825,
+            symbol: 'FXAIX',
+            sections: [{ secType: 'FUND', exchange: 'FUNDSERV' }],
+          }]))
+          .mockResolvedValueOnce(mockResponse([{ order_id: 'fund-order-123' }]));
+
+        await client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          symbol: 'FXAIX',
+          secType: 'FUND',
+          action: 'SELL',
+          orderType: 'MKT',
+          quantity: 25.125,
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body).toEqual({
+          orders: [{
+            conid: 141432825,
+            orderType: 'MKT',
+            side: 'SELL',
+            quantity: 25.125,
+            tif: 'DAY',
+            secType: '141432825:FUND',
+            listingExchange: 'FUNDSERV',
+          }],
+        });
+      });
+
+      it('should recognize restricted FUND metadata when FUNDSERV is only top-level', async () => {
+        mockFetch
+          .mockResolvedValueOnce(mockResponse([{
+            conid: 141432825,
+            symbol: 'FXAIX',
+            restricted: 'FUND',
+            description: 'Mutual fund routed through FUNDSERV',
+          }]))
+          .mockResolvedValueOnce(mockResponse([{ order_id: 'fund-order-123' }]));
+
+        await client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          symbol: 'FXAIX',
+          secType: 'FUND',
+          action: 'SELL',
+          orderType: 'MKT',
+          quantity: 1,
+        });
+
+        expect(findCallBody('/iserver/account/U12345/orders').orders[0])
+          .toEqual(expect.objectContaining({ conid: 141432825, secType: '141432825:FUND' }));
+      });
+
+      it('should reject unresolved or ambiguous FUND contracts before submitting', async () => {
+        await expect(client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          secType: 'FUND',
+          action: 'SELL',
+          orderType: 'MKT',
+          quantity: 1,
+        } as any)).rejects.toThrow('FUND orders require symbol or conid');
+
+        mockFetch.mockResolvedValueOnce(mockResponse([{
+          conid: 265598,
+          symbol: 'FXAIX',
+          sections: [{ secType: 'STK', exchange: 'SMART' }],
+        }]));
+        await expect(client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          symbol: 'FXAIX',
+          secType: 'FUND',
+          action: 'SELL',
+          orderType: 'MKT',
+          quantity: 1,
+        })).rejects.toThrow('Mutual fund FXAIX on FUNDSERV not found');
+
+        expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
+      });
+
+      it('should pass every ordinary restricted contract type through by conid', async () => {
+        mockFetch.mockImplementation(async () =>
+          mockResponse([{ order_id: 'restricted-order-123' }])
+        );
+
+        for (const secType of [
+          'FUT',
+          'FOP',
+          'CASH',
+          'WAR',
+          'BOND',
+          'CMDTY',
+          'FUND',
+          'CFD',
+          'IOPT',
+        ] as const) {
+          await client.order({
+            mode: 'SUBMIT',
+            accountId: 'U12345',
+            conid: 123456,
+            secType,
+            exchange: 'SMART',
+            action: 'SELL',
+            orderType: 'LMT',
+            quantity: 1,
+            price: 10,
+          });
+        }
+
+        const orderCalls = mockFetch.mock.calls.filter(([url]: [string]) =>
+          url.endsWith('/iserver/account/U12345/orders')
+        );
+        expect(orderCalls).toHaveLength(9);
+        expect(orderCalls.map(([, init]) => JSON.parse(init.body).orders[0].secType))
+          .toEqual([
+            '123456:FUT',
+            '123456:FOP',
+            '123456:CASH',
+            '123456:WAR',
+            '123456:BOND',
+            '123456:CMDTY',
+            '123456:FUND',
+            '123456:CFD',
+            '123456:IOPT',
+          ]);
+      });
+
+      it('should submit crypto with conidex and cashQty instead of conid', async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse([{ order_id: 'crypto-order-123' }]));
+
+        await client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          conid: 479624278,
+          secType: 'CRYPTO',
+          exchange: 'PAXOS',
+          action: 'BUY',
+          orderType: 'MKT',
+          cashQuantity: 1000,
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual({
+          conidex: '479624278@PAXOS',
+          orderType: 'MKT',
+          side: 'BUY',
+          cashQty: 1000,
+          tif: 'IOC',
+          secType: '479624278:CRYPTO',
+        });
+      });
+
+      it('should preserve a complete combo conidex without inventing a conid', async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse([{ order_id: 'combo-order-123' }]));
+        const conidex = '28812380;;;265598/1,272093/-1';
+
+        await client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          conidex,
+          secType: 'BAG',
+          action: 'BUY',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 1.25,
+        });
+
+        const body = findCallBody('/iserver/account/U12345/orders');
+        expect(body.orders[0]).toEqual({
+          conidex,
+          orderType: 'LMT',
+          side: 'BUY',
+          quantity: 1,
+          tif: 'DAY',
+          price: 1.25,
+        });
+      });
+
+      it.each([
+        {
+          name: 'conidex on an ordinary contract',
+          order: { conidex: '123456@SMART', secType: 'STK', quantity: 1 },
+          message: 'conidex is only supported for BAG and CRYPTO orders',
+        },
+        {
+          name: 'multiple size fields',
+          order: { conid: 123456, quantity: 1, cashQuantity: 100 },
+          message: 'Exactly one of quantity, cashQuantity, or fullPosition must be provided',
+        },
+        {
+          name: 'nonpositive quantity',
+          order: { conid: 123456, quantity: 0 },
+          message: 'Order quantity must be a positive number',
+        },
+        {
+          name: 'nonpositive cash quantity',
+          order: {
+            conid: 479624278,
+            secType: 'CRYPTO',
+            exchange: 'PAXOS',
+            cashQuantity: 0,
+          },
+          message: 'Order cashQuantity must be a positive number',
+        },
+        {
+          name: 'quantity-sized crypto market buy',
+          order: {
+            conid: 479624278,
+            secType: 'CRYPTO',
+            exchange: 'PAXOS',
+            quantity: 1,
+          },
+          message: 'CRYPTO market buys require cashQuantity',
+        },
+        {
+          name: 'BAG without conidex',
+          order: { conid: 123456, secType: 'BAG', quantity: 1 },
+          message: 'BAG orders require the full combo composition in conidex',
+        },
+        {
+          name: 'CRYPTO with unqualified conidex',
+          order: {
+            conidex: '479624278',
+            secType: 'CRYPTO',
+            action: 'SELL',
+            quantity: 1,
+          },
+          message: 'CRYPTO orders require an exchange-qualified conidex or conid plus exchange',
+        },
+        {
+          name: 'CRYPTO conid without an exchange',
+          order: {
+            conid: 479624278,
+            secType: 'CRYPTO',
+            action: 'SELL',
+            quantity: 1,
+          },
+          message: 'CRYPTO orders require an exchange-qualified conidex or conid plus exchange',
+        },
+        {
+          name: 'full position with a nonnumeric CRYPTO conidex',
+          order: {
+            conidex: 'BTC@PAXOS',
+            secType: 'CRYPTO',
+            action: 'SELL',
+            fullPosition: true,
+          },
+          message: 'Order requires quantity, cashQuantity, or a resolvable full position',
+        },
+      ])('should enforce runtime validation for $name', async ({ order, message }) => {
+        await expect(client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          action: 'BUY',
+          orderType: 'MKT',
+          ...order,
+        } as any)).rejects.toThrow(message);
+
+        expect(findCall('/iserver/account/U12345/orders')).toBeUndefined();
+      });
+
+      it.each(['BTC@PAXOS', '0@PAXOS'])(
+        'should pass opaque exchange-qualified CRYPTO conidex %s through without guessing',
+        async (conidex) => {
+          mockFetch.mockResolvedValueOnce(mockResponse([{ order_id: 'crypto-order-123' }]));
+
+          await client.order({
+            mode: 'SUBMIT',
+            accountId: 'U12345',
+            conidex,
+            secType: 'CRYPTO',
+            action: 'SELL',
+            orderType: 'LMT',
+            quantity: 1,
+            price: 10,
+          });
+
+          expect(findCallBody('/iserver/account/U12345/orders').orders[0])
+            .toEqual(expect.objectContaining({ conidex, quantity: 1, tif: 'DAY' }));
+        },
+      );
+
+      it('should reject non-STK symbolic resolution even if schema validation is bypassed', async () => {
+        await expect(client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          symbol: 'ES',
+          secType: 'FUT',
+          action: 'BUY',
+          orderType: 'MKT',
+          quantity: 1,
+        })).rejects.toThrow('FUT contract resolution requires conid');
+
+        await expect(client.order({
+          mode: 'SUBMIT',
+          accountId: 'U12345',
+          secType: 'STK',
+          action: 'BUY',
+          orderType: 'MKT',
+          quantity: 1,
+        } as any)).rejects.toThrow('Symbol is required when conid is not provided');
+      });
+
+      it('should use byte-equivalent order bodies for PREVIEW and SUBMIT full-position fund orders', async () => {
+        const position = [{ conid: 141432825, position: 37.625, assetClass: 'FUND' }];
+        mockFetch
+          .mockResolvedValueOnce(mockResponse(position))
+          .mockResolvedValueOnce(mockResponse([{ conid: 141432825, '31': '123.45' }]))
+          .mockResolvedValueOnce(mockResponse({ amount: { commission: '0.00' }, error: null }))
+          .mockResolvedValueOnce(mockResponse(position))
+          .mockResolvedValueOnce(mockResponse([{ order_id: 'fund-order-456' }]));
+
+        const sharedOrder = {
+          accountId: 'U12345',
+          conid: 141432825,
+          secType: 'FUND' as const,
+          action: 'SELL' as const,
+          orderType: 'MKT' as const,
+          fullPosition: true,
+        };
+
+        await client.order({ mode: 'PREVIEW', ...sharedOrder });
+        await client.order({ mode: 'SUBMIT', ...sharedOrder });
+
+        const previewCall = mockFetch.mock.calls.find(([url]: [string]) =>
+          url.includes('/iserver/account/U12345/orders/whatif')
+        );
+        const submitCall = mockFetch.mock.calls.find(([url]: [string]) =>
+          url.endsWith('/iserver/account/U12345/orders')
+        );
+        const previewBody = JSON.parse(previewCall?.[1]?.body);
+        const submitBody = JSON.parse(submitCall?.[1]?.body);
+
+        expect(previewBody).toEqual(submitBody);
+        expect(previewBody.orders[0]).toEqual(expect.objectContaining({
+          conid: 141432825,
+          secType: '141432825:FUND',
+          listingExchange: 'FUNDSERV',
+          side: 'SELL',
+          quantity: 37.625,
+        }));
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining('/iserver/marketdata/snapshot?conids=141432825&fields=31'),
+          expect.objectContaining({ method: 'GET' }),
+        );
+      });
+
+      it('should reject fullPosition when the requested side would increase the position', async () => {
+        mockFetch.mockResolvedValueOnce(mockResponse([{
+          conid: 141432825,
+          position: 10,
+          assetClass: 'FUND',
+        }]));
+
+        await expect(client.order({
+          mode: 'PREVIEW',
+          accountId: 'U12345',
+          conid: 141432825,
+          secType: 'FUND',
+          action: 'BUY',
+          orderType: 'MKT',
+          fullPosition: true,
+        })).rejects.toThrow('must use action SELL');
+
+        expect(mockFetch).not.toHaveBeenCalledWith(
+          expect.stringContaining('/orders/whatif'),
+          expect.anything(),
+        );
       });
     });
 
@@ -950,7 +1329,7 @@ describe('Option contract support', () => {
     expect(body.orders[0]).toEqual(
       expect.objectContaining({
         conid: 912345678,
-        secType: 'OPT',
+        secType: '912345678:OPT',
         side: 'BUY',
         orderType: 'LMT',
         quantity: 2,
@@ -975,7 +1354,7 @@ describe('Option contract support', () => {
     expect(body.orders[0]).toEqual(
       expect.objectContaining({
         conid: 912345678,
-        secType: 'OPT',
+        secType: '912345678:OPT',
         side: 'SELL',
         orderType: 'MKT',
         quantity: 1,

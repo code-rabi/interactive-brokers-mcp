@@ -1,5 +1,48 @@
 import { HttpError } from "../http.js";
 
+export const IBKR_SECURITY_TYPES = [
+  "STK",
+  "OPT",
+  "FUT",
+  "IND",
+  "FOP",
+  "CASH",
+  "BAG",
+  "WAR",
+  "BOND",
+  "CMDTY",
+  "NEWS",
+  "FUND",
+  "CFD",
+  "IOPT",
+  "CRYPTO",
+  "CONTFUT",
+  "EFP",
+  "EC",
+] as const;
+
+export type SecurityType = typeof IBKR_SECURITY_TYPES[number];
+
+// Discovery/data-only types and legacy EFP contracts are intentionally kept
+// out of this tool's order schema; EC is a secdef marker, not an order type.
+export const IBKR_ORDER_SECURITY_TYPES = [
+  "STK",
+  "OPT",
+  "FUT",
+  "FOP",
+  "CASH",
+  "BAG",
+  "WAR",
+  "BOND",
+  "CMDTY",
+  "FUND",
+  "CFD",
+  "IOPT",
+  "CRYPTO",
+] as const satisfies readonly SecurityType[];
+
+export type OrderSecurityType = typeof IBKR_ORDER_SECURITY_TYPES[number];
+
 export interface AuthStatusResponse {
   authenticated?: boolean;
   connected?: boolean;
@@ -24,6 +67,7 @@ export interface ContractSearch {
   symbol: string;
   description?: string;
   companyHeader?: string;
+  restricted?: string | boolean;
   sections?: ContractSection[];
 }
 
@@ -53,13 +97,15 @@ export interface OrderConfirmation {
 }
 
 export interface OrderPayload {
-  conid: number;
+  conid?: number;
+  conidex?: string;
   orderType: string;
   side: string;
-  quantity: number;
+  quantity?: number;
+  cashQty?: number;
   tif: string;
   secType?: string;
-  exchange?: string;
+  listingExchange?: string;
   price?: number;
   auxPrice?: number;
 }
@@ -77,7 +123,8 @@ export interface IBClientConfig {
 export interface ContractLookupRequest {
   symbol?: string;
   conid?: number;
-  secType?: "STK" | "OPT";
+  conidex?: string;
+  secType?: OrderSecurityType;
   expiry?: string;
   strike?: number;
   right?: "C" | "P";
@@ -85,10 +132,13 @@ export interface ContractLookupRequest {
 }
 
 export interface OrderRequest extends ContractLookupRequest {
+  mode: "PREVIEW" | "SUBMIT";
   accountId: string;
   action: "BUY" | "SELL";
   orderType: "MKT" | "LMT" | "STP";
-  quantity: number;
+  quantity?: number;
+  cashQuantity?: number;
+  fullPosition?: boolean;
   price?: number;
   stopPrice?: number;
   suppressConfirmations?: boolean;
@@ -98,7 +148,7 @@ export interface OrderRequest extends ContractLookupRequest {
 export interface ResolvedContract {
   conid: number;
   symbol: string;
-  secType: "STK" | "OPT";
+  secType: SecurityType;
   contract: ContractSearch | OptionContractInfo;
   underlyingConid?: number;
 }
