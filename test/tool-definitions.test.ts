@@ -378,6 +378,55 @@ describe('Tool Definitions - Zod Schemas', () => {
         tif: 'DAY',
       }).success).toBe(false);
     });
+
+    it.each([
+      {
+        name: 'missing contract identifier',
+        order: { quantity: 1 },
+        paths: ['symbol'],
+      },
+      {
+        name: 'missing size',
+        order: { conid: 123456 },
+        paths: ['quantity'],
+      },
+      {
+        name: 'BAG without a complete conidex',
+        order: { conid: 123456, secType: 'BAG', quantity: 1 },
+        paths: ['conidex'],
+      },
+      {
+        name: 'CRYPTO without an exchange-qualified contract',
+        order: {
+          conid: 479624278,
+          secType: 'CRYPTO',
+          action: 'SELL',
+          orderType: 'LMT',
+          quantity: 1,
+          price: 10,
+        },
+        paths: ['exchange'],
+      },
+      {
+        name: 'OPT without symbolic contract fields',
+        order: { secType: 'OPT', quantity: 1 },
+        paths: ['symbol', 'expiry', 'strike', 'right'],
+      },
+    ])('should reject $name', ({ order, paths }) => {
+      const result = PlaceOrderZodSchema.safeParse({
+        mode: 'SUBMIT',
+        accountId: 'U12345',
+        action: 'BUY',
+        orderType: 'MKT',
+        ...order,
+      });
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.map((issue) => String(issue.path[0])))
+          .toEqual(expect.arrayContaining(paths));
+      }
+    });
   });
 
   describe('GetPositionsZodSchema', () => {

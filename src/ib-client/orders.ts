@@ -246,8 +246,9 @@ async function buildOrderPayload(
     }
     orderPayload.conidex = conidex;
     if (orderRequest.orderType === "MKT") orderPayload.tif = "IOC";
-  } else if (contract) {
-    orderPayload.conid = contract.conid;
+  } else {
+    // All non-BAG/CRYPTO paths resolve a concrete contract above.
+    orderPayload.conid = contract!.conid;
   }
 
   if (orderRequest.secType && contract) {
